@@ -5,6 +5,49 @@
 // Бэктест на BTCUSDT показал 11% win rate / PF 0.375 на чистом сигнале —
 // правки ниже отвечают на это, а не косметика ради косметики.
 //
+// v11 → v12 (SMC-апгрейд, группы "10." и "11."):
+// ДОБАВЛЕНО:
+//   - CHoCH/BOS: каждый слом теперь классифицирован как продолжение структуры
+//     (BOS) или разворот (CHoCH — первый слом против предыдущего направления
+//     в том же масштабе, лок/глоб отдельно). Счётчик CHoCH/BOS в воронке,
+//     отдельные алерты "CHoCH ВВЕРХ/ВНИЗ".
+//   - EQH/EQL — равные хаи/лои (× eqATR от ATR14) помечаются суффиксом "="
+//     на метке экстремума, локально и глобально.
+//   - Sweep — снятие ликвидности без закрепа (тень пробила уровень, close
+//     вернулся обратно), метка "SWEEP", счётчик в воронке.
+//   - Order Block — только для ГЛОБАЛЬНЫХ сломов (осознанно сужено ради
+//     надёжности): последняя противоположная свеча перед стартом попытки,
+//     статичная зона (без live-отслеживания митигации) с проекцией obProjLen.
+//   - FVG / имбаланс — классический 3-свечной гэп, статичные зоны, независимо
+//     от структуры/закрепа.
+//   - HTF-контекст (группа "11.") — направление структуры на старшем ТФ через
+//     request.security (HH/HL vs LH/LL на пивотах, НЕ прокси через 1 пивот,
+//     как было в старой убранной "ловушке ТФ"), опциональный мягкий фильтр
+//     скора вместо убранного EMA-фильтра.
+//   - Гранулярные алерты: CHoCH, "ретест достиг уровня" (ранний хедз-ап),
+//     "попытка заблокирована фильтром сессии/сквиза".
+//   - Компаньон-стратегия (slom_trenda_v11_strategy.pine) — облегчённое ядро
+//     без визуального шума, с реальными strategy.entry/exit для бэктеста.
+// УБРАНО:
+//   - Группа "8. MACD-дивергенция" целиком (сама себя называла чисто
+//     информационной, сигнал не двигала — лишний код без веса в решении).
+//   - EMA-фильтр как модификатор скора (useEmaFilter) — EMA 50/200 и её
+//     строка в Панели тренда остались чисто визуальным контекстом.
+//   - nRebind/nReborn/"невязка" из панели воронки — были диагностикой аудита
+//     самого скрипта, трейдеру на графике не нужны; освободившиеся строки
+//     отданы под CHoCH/BOS и sweep-счётчики.
+// РЕФАКТОРИНГ: вынесены 3 места, где 4 блока закрепа (ЛОК/ГЛОБ × хай/лой)
+// дублировали ОДИНАКОВУЮ логику (f_holdCnt/f_rebind/f_retestTouched, все
+// проверены на построчную эквивалентность с оригиналом). Полное сведение
+// всех 4 блоков в одну функцию НЕ сделано осознанно: Pine не передаёт
+// скаляры по ссылке, а состояние каждого блока — это ~15 переменных
+// (aXXon/ref/far/wick/wickOK/bar/cnt, XXBroken/BrokenFar, 6 rtXX*), что
+// потребовало бы функции с ~25+ параметрами/возвратами через тюпл — заметно
+// менее читаемо и куда рискованнее мехнически перепроверить, чем нынешний
+// явный (пусть и повторяющийся) код. Технически верный путь — user-defined
+// type с мутацией полей объекта (Pine передаёт объекты по ссылке) — это
+// отдельный, более крупный рефакторинг, не входивший в этот раунд.
+//
 // ФИКС #9 (повторный аудит v11): визуализация стоп/тейка (группа "9.") рисовалась
 // для ЛЮБОЙ попытки закрепа — включая подавленные как дубль ГЛОБ-уровня (nearGlob)
 // и слабые по скору при выключенном showWeak, то есть уровни, для которых даже
@@ -186,8 +229,6 @@ useVolFilter = input.bool(false, "Фильтр по объёму", group = G6)
 volLen       = input.int(20, "Объём: период SMA", minval = 2, group = G6)
 volMult      = input.float(1.2, "Объём: множитель от SMA", minval = 0.1, step = 0.1, group = G6)
 
-useEmaFilter = input.bool(false, "Слом против EMA — снижает скор", group = G6)
-
 useRetest     = input.bool(false, "Требовать ретест с отбоем перед сигналом", group = G6)
 retestATR     = input.float(1.0, "Ретест: допуск от уровня, × ATR14", minval = 0.1, step = 0.1, group = G6)
 retestWindow  = input.int(10, "Ретест: окно ожидания, баров", minval = 2, group = G6)
@@ -199,18 +240,24 @@ useSqueezeFilter = input.bool(false, "Фильтр сжатия волатиль
 atrSmaLen        = input.int(50, "Волатильность: период средней ATR", minval = 5, group = G6)
 squeezeMult      = input.float(0.7, "Сквиз, если ATR14 < × средней ATR", minval = 0.1, step = 0.05, group = G6)
 
-G7 = "8. MACD-дивергенция (информационно, на пивотах)"
-useDiv      = input.bool(false, "Показывать MACD-дивергенцию на пивотах", group = G7)
-macdFast    = input.int(12, "MACD: быстрая EMA", minval = 2, group = G7)
-macdSlow    = input.int(26, "MACD: медленная EMA", minval = 3, group = G7)
-macdSig     = input.int(9,  "MACD: сигнальная EMA", minval = 2, group = G7)
-divSource   = input.string("MACD-линия", "Сравнивать по", options = ["MACD-линия", "Гистограмма"], group = G7)
-
 G9 = "9. Стоп/тейк на сломе"
 showStopTake = input.bool(false, "Показывать стоп/тейк на сломе", group = G9)
 rrRatioViz   = input.float(3.0, "R:R", minval = 0.5, step = 0.5, group = G9)
 slBufferViz  = input.float(0.3, "Стоп: доп. буфер за зоной, × ATR14", minval = 0, step = 0.1, group = G9)
 stVizLen     = input.int(30, "Длина линий стоп/тейка вправо, баров", minval = 5, maxval = 200, group = G9)
+
+G10 = "10. Ликвидность"
+useEQ     = input.bool(true, "Равные хаи/лои (EQH/EQL)", group = G10)
+eqATR     = input.float(0.15, "Допуск \"равности\", × ATR14", minval = 0.01, step = 0.01, group = G10)
+useSweep  = input.bool(true, "Отмечать снятие ликвидности (sweep)", group = G10)
+useOB     = input.bool(true, "Order Block на сломе", group = G10)
+obProjLen = input.int(40, "OB/FVG: длина проекции зоны, баров", minval = 5, maxval = 300, group = G10)
+useFVG    = input.bool(true, "Fair Value Gap (имбаланс)", group = G10)
+
+G11 = "11. HTF-контекст"
+useHtfFilter = input.bool(false, "Слом против HTF-структуры — снижает скор", group = G11)
+htfTF        = input.timeframe("240", "Старший ТФ", group = G11)
+htfLB        = input.int(10, "HTF: lookback пивота", minval = 2, group = G11)
 
 strictRef  = refMode == "Конец тени (строго)"
 needWickOK = refMode == "Тело + подтверждение тенью"
@@ -222,14 +269,26 @@ emaTrend = emaFast > emaSlow and close > emaFast ? 1 : emaFast < emaSlow and clo
 plot(showEMA ? emaFast : na, "EMA 50",  color = color.new(#ffb74d, 0))
 plot(showEMA ? emaSlow : na, "EMA 200", color = color.new(#7e57c2, 0), linewidth = 2)
 
-// фильтр C (MACD-дивергенция): считаем безусловно (ta.* не любит условные вызовы),
-// используется только если useDiv включён — иначе divVal просто не читается
-macdFastMA = ta.ema(close, macdFast)
-macdSlowMA = ta.ema(close, macdSlow)
-macdLine   = macdFastMA - macdSlowMA
-macdSignal = ta.ema(macdLine, macdSig)
-macdHist   = macdLine - macdSignal
-divVal     = divSource == "Гистограмма" ? macdHist : macdLine
+// ADD-7: направление HTF-структуры — НЕ прокси через один пивот (как было
+// в старой убранной "ловушке старшего ТФ"), а последовательность HH/HL
+// против LH/LL на самом старшем ТФ: новый HH или HL — бычье направление,
+// новый LH или LL — медвежье. Считаем безусловно (ta.*/request.* не любят
+// условные вызовы) — используется только если useHtfFilter включён.
+f_htfStructDir() =>
+    var float prevPH = na
+    var float prevPL = na
+    var int   dir = 0
+    ph = ta.pivothigh(high, htfLB, htfLB)
+    pl = ta.pivotlow(low, htfLB, htfLB)
+    if not na(ph)
+        dir := not na(prevPH) and ph > prevPH ? 1 : not na(prevPH) ? -1 : dir
+        prevPH := ph
+    if not na(pl)
+        dir := not na(prevPL) and pl < prevPL ? -1 : not na(prevPL) ? 1 : dir
+        prevPL := pl
+    dir
+
+htfStructDir = request.security(syminfo.tickerid, htfTF, f_htfStructDir(), lookahead = barmerge.lookahead_off)
 
 atr14 = ta.atr(14)
 
@@ -280,6 +339,8 @@ var array<label> keptExt       = array.new<label>()
 var array<label> keptSig       = array.new<label>()
 var array<line>  keptStopTake    = array.new<line>()
 var array<label> keptStopTakeLbl = array.new<label>()
+var array<box>   keptFVGBoxes    = array.new<box>()   // ADD-5
+var array<box>   keptOBBoxes     = array.new<box>()   // ADD-4
 
 pushLocBox(box b) =>
     array.push(keptLocBoxes, b)
@@ -340,17 +401,37 @@ pushStopTakeLbl(label lb) =>
     while array.size(keptStopTakeLbl) > maxKeep
         label.delete(array.shift(keptStopTakeLbl))
 
+pushFVGBox(box b) =>
+    array.push(keptFVGBoxes, b)
+    while array.size(keptFVGBoxes) > maxKeep
+        box.delete(array.shift(keptFVGBoxes))
+
+pushOBBox(box b) =>
+    array.push(keptOBBoxes, b)
+    while array.size(keptOBBoxes) > maxKeep
+        box.delete(array.shift(keptOBBoxes))
+
+// REMOVE-4: частичное обобщение 4 блоков закрепа (ЛОК/ГЛОБ × хай/лой).
+// Полный свод всех 4 блоков в одну функцию технически возможен только через
+// user-defined type с мутацией полей объекта (Pine не передаёт скаляры по
+// ссылке) — это отдельный, гораздо более рискованный рефакторинг структуры
+// состояния, которая уже трижды точечно правилась по результатам аудита.
+// Здесь безопасно вынесены три места, где реально дублировалась ЛОГИКА
+// (не просто похожий код), проверенные на эквивалентность построчно:
+f_holdCnt(cnt, impulse, hold) =>
+    impulse ? holdBars : hold ? cnt + 1 : strictMode ? 0 : cnt
+
+f_rebind(z, ref, isHigh) =>
+    not na(z) and (isHigh ? z > ref : z < ref)
+
+f_retestTouched(touched, startBar, lvl, tol, isHigh) =>
+    not touched and bar_index > startBar and (isHigh ? low <= lvl + tol : high >= lvl - tol)
+
 // ЭКСТРЕМУМЫ: предыдущие значения для классификации ----------------------------
 var float prevLocPH = na
 var float prevLocPL = na
 var float prevGlobPH = na
 var float prevGlobPL = na
-
-// MACD-дивергенция: значение divVal на предыдущем пивоте того же типа
-var float prevLocPH_div = na
-var float prevLocPL_div = na
-var float prevGlobPH_div = na
-var float prevGlobPL_div = na
 
 // ЗОНЫ ------------------------------------------------------------------------
 var float lhTop = na
@@ -368,6 +449,13 @@ var box   glBox = na
 var int   ghBar = na    // фикс #6: когда появилась текущая глобальная зона сопротивления
 var int   glBar = na    // фикс #6: когда появилась текущая глобальная зона поддержки
 
+// ADD-3: снят ли уже sweep по ТЕКУЩЕЙ (ещё не пробитой) зоне — чтобы не
+// повторять метку на каждом баре, пока цена просто торчит выше/ниже уровня
+var bool lhSwept = false
+var bool llSwept = false
+var bool ghSwept = false
+var bool glSwept = false
+
 // ПОПЫТКИ ---------------------------------------------------------------------
 var bool  aLHon = false
 var float aLHref = na
@@ -384,6 +472,10 @@ var float aGHwick = na
 var bool  aGHwickOK = false
 var int   aGHbar = na
 var int   aGHcnt = 0
+// ADD-4: Order Block — последняя противоположная свеча перед стартом попытки
+// (только для ГЛОБАЛЬНЫХ сломов — самые значимые, остальные не перегружаем)
+var float aGHobTop = na
+var float aGHobBot = na
 
 var bool  aLLon = false
 var float aLLref = na
@@ -400,6 +492,8 @@ var float aGLwick = na
 var bool  aGLwickOK = false
 var int   aGLbar = na
 var int   aGLcnt = 0
+var float aGLobTop = na
+var float aGLobBot = na
 
 var float lhBroken = na
 var float lhBrokenFar = na
@@ -442,11 +536,11 @@ var label locTPLblDn = na
 var int nStarted    = 0
 var int nFailBack   = 0
 var int nFailWindow = 0
-var int nRebind     = 0
-var int nReborn     = 0
 var int nLocSlom    = 0
 var int nGlobSlom   = 0
 var int nRetestFail = 0
+var int nChoch      = 0   // ADD-1
+var int nSweep      = 0   // ADD-3
 
 // РЕТЕСТ (фильтр C): после закрепа, если useRetest — сигнал не выдаётся сразу,
 // а ждём возврата к уровню (touched) и последующего закрытия обратно за уровень (отбой)
@@ -470,6 +564,8 @@ var int   rtGHbar = na
 var int   rtGHstb = na
 var bool  rtGHtouched = false
 var float rtGHfar = na
+var float rtGHobTop = na   // ADD-4
+var float rtGHobBot = na
 
 var bool  rtGLon = false
 var float rtGLlvl = na
@@ -477,6 +573,8 @@ var int   rtGLbar = na
 var int   rtGLstb = na
 var bool  rtGLtouched = false
 var float rtGLfar = na
+var float rtGLobTop = na   // ADD-4
+var float rtGLobBot = na
 
 bool sigLocUp  = false
 bool sigLocDn  = false
@@ -491,6 +589,21 @@ bool sigLocDnShown  = false
 bool sigGlobUpShown = false
 bool sigGlobDnShown = false
 
+// ADD-8: CHoCH-алерты — true когда показанный сигнал (любой, лок или глоб)
+// оказался разворотным (CHoCH), а не продолжением структуры (BOS)
+bool chochUpShown = false
+bool chochDnShown = false
+
+// ADD-8: ретест достиг уровня (touched стал true) в этот бар — ранний хедз-ап
+// до итогового отбоя/сигнала
+bool retestTouchedUp = false
+bool retestTouchedDn = false
+
+// ADD-8: цена пробила уровень, но новая попытка не стартовала — заблокирована
+// фильтром сессии/сквиза (startOK = false)
+bool filterBlockedUp = false
+bool filterBlockedDn = false
+
 float sLvlLocUp = na
 float sLvlLocDn = na
 float sLvlGlobUp = na
@@ -504,21 +617,27 @@ float sFarLocDn = na
 float sFarGlobUp = na
 float sFarGlobDn = na
 
+// ADD-4: Order Block зона для текущего ГЛОБ-сигнала (na, если перед стартом
+// попытки не было противоположной свечи — тогда OB просто не рисуется)
+float sObTopGlobUp = na
+float sObBotGlobUp = na
+float sObTopGlobDn = na
+float sObBotGlobDn = na
+
 if barstate.isconfirmed
 
     // ===== ЗОНЫ + РАЗМЕТКА ЭКСТРЕМУМОВ ======================================
     if not na(phLoc)
         pb = bar_index - locLB
         cls = na(prevLocPH) ? "H" : (phLoc > prevLocPH ? "HH" : "LH")
-        divNow = divVal[locLB]
-        divBear = useDiv and cls == "HH" and not na(prevLocPH_div) and divNow <= prevLocPH_div
+        // ADD-2: равный хай — новый пивот в пределах eqATR×ATR14 от предыдущего того же типа
+        eq = useEQ and not na(prevLocPH) and math.abs(phLoc - prevLocPH) <= eqATR * atr14
         if showLocExt
             c = cls == "HH" ? bullCol : cls == "LH" ? bearCol : neutCol
-            lblTxt = extText ? cls + (divBear ? "÷" : "") : ""
-            tt = cls + (divBear ? " + MACD-дивергенция" : "") + " · " + str.tostring(phLoc, format.mintick)
+            lblTxt = extText ? cls + (eq ? "=" : "") : ""
+            tt = cls + (eq ? " + EQH (равный хай)" : "") + " · " + str.tostring(phLoc, format.mintick)
             pushExt(label.new(pb, phLoc, lblTxt, style = label.style_label_down, color = extText ? color.new(c, 70) : color.new(c, 30), textcolor = color.new(c, 0), size = size.tiny, tooltip = tt))
         prevLocPH := phLoc
-        prevLocPH_div := divNow
 
         // фикс #2: если по старой зоне ещё идёт попытка закрепа — архивируем
         // её (остаётся на графике), а не стираем молча
@@ -530,19 +649,18 @@ if barstate.isconfirmed
         lhTop := high[locLB]
         lhBot := math.max(open[locLB], close[locLB])
         lhBox := showLocZones ? box.new(pb, lhTop, bar_index, lhBot, border_color = color.new(bearCol, 45), bgcolor = color.new(bearCol, zoneTransp), border_width = 1) : na
+        lhSwept := false   // ADD-3: новый уровень — ещё не было попытки его смести
 
     if not na(plLoc)
         pb = bar_index - locLB
         cls = na(prevLocPL) ? "L" : (plLoc > prevLocPL ? "HL" : "LL")
-        divNow = divVal[locLB]
-        divBull = useDiv and cls == "LL" and not na(prevLocPL_div) and divNow >= prevLocPL_div
+        eq = useEQ and not na(prevLocPL) and math.abs(plLoc - prevLocPL) <= eqATR * atr14
         if showLocExt
             c = cls == "HL" ? bullCol : cls == "LL" ? bearCol : neutCol
-            lblTxt = extText ? cls + (divBull ? "÷" : "") : ""
-            tt = cls + (divBull ? " + MACD-дивергенция" : "") + " · " + str.tostring(plLoc, format.mintick)
+            lblTxt = extText ? cls + (eq ? "=" : "") : ""
+            tt = cls + (eq ? " + EQL (равный лой)" : "") + " · " + str.tostring(plLoc, format.mintick)
             pushExt(label.new(pb, plLoc, lblTxt, style = label.style_label_up, color = extText ? color.new(c, 70) : color.new(c, 30), textcolor = color.new(c, 0), size = size.tiny, tooltip = tt))
         prevLocPL := plLoc
-        prevLocPL_div := divNow
 
         if not na(llBox)
             if aLLon or rtLLon
@@ -552,19 +670,18 @@ if barstate.isconfirmed
         llBot := low[locLB]
         llTop := math.min(open[locLB], close[locLB])
         llBox := showLocZones ? box.new(pb, llTop, bar_index, llBot, border_color = color.new(bullCol, 45), bgcolor = color.new(bullCol, zoneTransp), border_width = 1) : na
+        llSwept := false
 
     if not na(phGlob)
         pb = bar_index - globLB
         cls = na(prevGlobPH) ? "H" : (phGlob > prevGlobPH ? "HH" : "LH")
-        divNow = divVal[globLB]
-        divBear = useDiv and cls == "HH" and not na(prevGlobPH_div) and divNow <= prevGlobPH_div
+        eq = useEQ and not na(prevGlobPH) and math.abs(phGlob - prevGlobPH) <= eqATR * atr14
         if showGlobExt
             c = cls == "HH" ? bullCol : cls == "LH" ? bearCol : neutCol
-            lblTxt = extText ? cls + (divBear ? "÷" : "") : ""
-            tt = "ГЛОБАЛЬНЫЙ " + cls + (divBear ? " + MACD-дивергенция" : "") + " · " + str.tostring(phGlob, format.mintick)
+            lblTxt = extText ? cls + (eq ? "=" : "") : ""
+            tt = "ГЛОБАЛЬНЫЙ " + cls + (eq ? " + EQH (равный хай)" : "") + " · " + str.tostring(phGlob, format.mintick)
             pushExt(label.new(pb, phGlob, lblTxt, style = label.style_label_down, color = color.new(c, 20), textcolor = color.white, size = size.small, tooltip = tt))
         prevGlobPH := phGlob
-        prevGlobPH_div := divNow
 
         if not na(ghBox)
             if aGHon or rtGHon
@@ -575,19 +692,18 @@ if barstate.isconfirmed
         ghBot := math.max(open[globLB], close[globLB])
         ghBox := showGlobZones ? box.new(pb, ghTop, bar_index, ghBot, border_color = color.new(bearCol, 10), bgcolor = color.new(bearCol, zoneTransp), border_width = 2) : na
         ghBar := bar_index
+        ghSwept := false
 
     if not na(plGlob)
         pb = bar_index - globLB
         cls = na(prevGlobPL) ? "L" : (plGlob > prevGlobPL ? "HL" : "LL")
-        divNow = divVal[globLB]
-        divBull = useDiv and cls == "LL" and not na(prevGlobPL_div) and divNow >= prevGlobPL_div
+        eq = useEQ and not na(prevGlobPL) and math.abs(plGlob - prevGlobPL) <= eqATR * atr14
         if showGlobExt
             c = cls == "HL" ? bullCol : cls == "LL" ? bearCol : neutCol
-            lblTxt = extText ? cls + (divBull ? "÷" : "") : ""
-            tt = "ГЛОБАЛЬНЫЙ " + cls + (divBull ? " + MACD-дивергенция" : "") + " · " + str.tostring(plGlob, format.mintick)
+            lblTxt = extText ? cls + (eq ? "=" : "") : ""
+            tt = "ГЛОБАЛЬНЫЙ " + cls + (eq ? " + EQL (равный лой)" : "") + " · " + str.tostring(plGlob, format.mintick)
             pushExt(label.new(pb, plGlob, lblTxt, style = label.style_label_up, color = color.new(c, 20), textcolor = color.white, size = size.small, tooltip = tt))
         prevGlobPL := plGlob
-        prevGlobPL_div := divNow
 
         if not na(glBox)
             if aGLon or rtGLon
@@ -598,6 +714,7 @@ if barstate.isconfirmed
         glTop := math.min(open[globLB], close[globLB])
         glBox := showGlobZones ? box.new(pb, glTop, bar_index, glBot, border_color = color.new(bullCol, 10), bgcolor = color.new(bullCol, zoneTransp), border_width = 2) : na
         glBar := bar_index
+        glSwept := false
 
     if not na(lhBox)
         box.set_right(lhBox, bar_index)
@@ -608,33 +725,65 @@ if barstate.isconfirmed
     if not na(glBox)
         box.set_right(glBox, bar_index)
 
+    // ===== ЛИКВИДНОСТЬ: SWEEP (ADD-3) =======================================
+    // Снятие ликвидности без закрепа: тень пробила уровень, close вернулся
+    // обратно. Не зависит от state-machine закрепа (aXXon) — просто следит
+    // за текущим (ещё не пробитым) уровнем; засчитывается один раз до тех
+    // пор, пока не появится новый пивот того же типа (lhSwept сбрасывается там).
+    if useSweep
+        if not na(lhTop) and not lhSwept and high > lhTop and close <= lhTop
+            lhSwept := true
+            nSweep += 1
+            pushExt(label.new(bar_index, high, "SWEEP", style = label.style_label_down, color = color.new(bearCol, 40), textcolor = color.white, size = size.tiny, tooltip = "Снятие ликвидности выше " + str.tostring(lhTop, format.mintick) + " без закрепа"))
+        if not na(llBot) and not llSwept and low < llBot and close >= llBot
+            llSwept := true
+            nSweep += 1
+            pushExt(label.new(bar_index, low, "SWEEP", style = label.style_label_up, color = color.new(bullCol, 40), textcolor = color.white, size = size.tiny, tooltip = "Снятие ликвидности ниже " + str.tostring(llBot, format.mintick) + " без закрепа"))
+        if not na(ghTop) and not ghSwept and high > ghTop and close <= ghTop
+            ghSwept := true
+            nSweep += 1
+            pushExt(label.new(bar_index, high, "SWEEP", style = label.style_label_down, color = color.new(bearCol, 20), textcolor = color.white, size = size.small, tooltip = "Снятие ГЛОБАЛЬНОЙ ликвидности выше " + str.tostring(ghTop, format.mintick) + " без закрепа"))
+        if not na(glBot) and not glSwept and low < glBot and close >= glBot
+            glSwept := true
+            nSweep += 1
+            pushExt(label.new(bar_index, low, "SWEEP", style = label.style_label_up, color = color.new(bullCol, 20), textcolor = color.white, size = size.small, tooltip = "Снятие ГЛОБАЛЬНОЙ ликвидности ниже " + str.tostring(glBot, format.mintick) + " без закрепа"))
+
+    // ===== FVG / ИМБАЛАНС (ADD-5) ===========================================
+    // Стандартный 3-свечной гэп: тень текущей свечи не перекрывает тень
+    // свечи 2 бара назад — средняя свеча не заполнила разрыв. Проверяется
+    // на каждом подтверждённом баре независимо от структуры/закрепа.
+    // Зона статична (без live-отслеживания заполнения) — фикс. проекция obProjLen.
+    if useFVG
+        bullFVG = low > high[2]
+        bearFVG = high < low[2]
+        if bullFVG
+            pushFVGBox(box.new(bar_index - 2, low, bar_index + obProjLen, high[2], border_color = color.new(bullCol, 60), bgcolor = color.new(bullCol, 88), border_width = 1, border_style = line.style_dashed))
+        if bearFVG
+            pushFVGBox(box.new(bar_index - 2, low[2], bar_index + obProjLen, high, border_color = color.new(bearCol, 60), bgcolor = color.new(bearCol, 88), border_width = 1, border_style = line.style_dashed))
+
     // ===== СБРОС «УЖЕ СЛОМАН» ===============================================
     // фикс #5: сбрасываем *Far вместе с *Broken
     if not na(lhBroken) and not na(lhBrokenFar) and close < lhBrokenFar
         lhBroken := na
         lhBrokenFar := na
-        nReborn += 1
         if rtLHon
             rtLHon := false
             nRetestFail += 1
     if not na(ghBroken) and not na(ghBrokenFar) and close < ghBrokenFar
         ghBroken := na
         ghBrokenFar := na
-        nReborn += 1
         if rtGHon
             rtGHon := false
             nRetestFail += 1
     if not na(llBroken) and not na(llBrokenFar) and close > llBrokenFar
         llBroken := na
         llBrokenFar := na
-        nReborn += 1
         if rtLLon
             rtLLon := false
             nRetestFail += 1
     if not na(glBroken) and not na(glBrokenFar) and close > glBrokenFar
         glBroken := na
         glBrokenFar := na
-        nReborn += 1
         if rtGLon
             rtGLon := false
             nRetestFail += 1
@@ -645,26 +794,24 @@ if barstate.isconfirmed
     zGL = strictRef ? glBot : glTop
 
     // ===== ПЕРЕПРИВЯЗКА ======================================================
-    if aLHon and not na(zLH) and zLH > aLHref
+    if aLHon and f_rebind(zLH, aLHref, true)
         aLHon := false
         aLHcnt := 0
-        nRebind += 1
-    if aGHon and not na(zGH) and zGH > aGHref
+    if aGHon and f_rebind(zGH, aGHref, true)
         aGHon := false
         aGHcnt := 0
-        nRebind += 1
-    if aLLon and not na(zLL) and zLL < aLLref
+    if aLLon and f_rebind(zLL, aLLref, false)
         aLLon := false
         aLLcnt := 0
-        nRebind += 1
-    if aGLon and not na(zGL) and zGL < aGLref
+    if aGLon and f_rebind(zGL, aGLref, false)
         aGLon := false
         aGLcnt := 0
-        nRebind += 1
 
     // ===== ЗАКРЕП ===========================================================
     refLH = aLHon ? aLHref : zLH
     if not na(refLH) and (na(lhBroken) or refLH != lhBroken)
+        if close > refLH and not aLHon and not startOK
+            filterBlockedUp := true   // ADD-8
         if close > refLH and (aLHon or startOK)
             if not aLHon
                 aLHon := true
@@ -677,12 +824,7 @@ if barstate.isconfirmed
                 nStarted += 1
             if close > aLHwick
                 aLHwickOK := true
-            if impUpC
-                aLHcnt := holdBars
-            else if holdUpC
-                aLHcnt += 1
-            else if strictMode
-                aLHcnt := 0
+            aLHcnt := f_holdCnt(aLHcnt, impUpC, holdUpC)
             if aLHcnt >= holdBars and (not needWickOK or aLHwickOK)
                 lhBroken := aLHref
                 lhBrokenFar := aLHfar
@@ -718,6 +860,8 @@ if barstate.isconfirmed
 
     refLL = aLLon ? aLLref : zLL
     if not na(refLL) and (na(llBroken) or refLL != llBroken)
+        if close < refLL and not aLLon and not startOK
+            filterBlockedDn := true   // ADD-8
         if close < refLL and (aLLon or startOK)
             if not aLLon
                 aLLon := true
@@ -730,12 +874,7 @@ if barstate.isconfirmed
                 nStarted += 1
             if close < aLLwick
                 aLLwickOK := true
-            if impDnC
-                aLLcnt := holdBars
-            else if holdDnC
-                aLLcnt += 1
-            else if strictMode
-                aLLcnt := 0
+            aLLcnt := f_holdCnt(aLLcnt, impDnC, holdDnC)
             if aLLcnt >= holdBars and (not needWickOK or aLLwickOK)
                 llBroken := aLLref
                 llBrokenFar := aLLfar
@@ -771,6 +910,8 @@ if barstate.isconfirmed
 
     refGH = aGHon ? aGHref : zGH
     if not na(refGH) and (na(ghBroken) or refGH != ghBroken)
+        if close > refGH and not aGHon and not startOK
+            filterBlockedUp := true   // ADD-8
         if close > refGH and (aGHon or startOK)
             if not aGHon
                 aGHon := true
@@ -781,14 +922,16 @@ if barstate.isconfirmed
                 aGHbar := bar_index
                 aGHcnt := 0
                 nStarted += 1
+                // ADD-4: Order Block — свеча ПЕРЕД стартом попытки, если она медвежья
+                if close[1] < open[1]
+                    aGHobTop := high[1]
+                    aGHobBot := low[1]
+                else
+                    aGHobTop := na
+                    aGHobBot := na
             if close > aGHwick
                 aGHwickOK := true
-            if impUpC
-                aGHcnt := holdBars
-            else if holdUpC
-                aGHcnt += 1
-            else if strictMode
-                aGHcnt := 0
+            aGHcnt := f_holdCnt(aGHcnt, impUpC, holdUpC)
             if aGHcnt >= holdBars and (not needWickOK or aGHwickOK)
                 ghBroken := aGHref
                 ghBrokenFar := aGHfar
@@ -803,11 +946,15 @@ if barstate.isconfirmed
                     rtGHstb := aGHbar
                     rtGHtouched := false
                     rtGHfar := aGHfar
+                    rtGHobTop := aGHobTop   // ADD-4
+                    rtGHobBot := aGHobBot
                 else
                     sigGlobUp := true
                     sLvlGlobUp := aGHref
                     sBarGlobUp := aGHbar
                     sFarGlobUp := aGHfar
+                    sObTopGlobUp := aGHobTop   // ADD-4
+                    sObBotGlobUp := aGHobBot
                 aGHon := false
                 aGHcnt := 0
             else if bar_index - aGHbar >= holdWindow
@@ -824,6 +971,8 @@ if barstate.isconfirmed
 
     refGL = aGLon ? aGLref : zGL
     if not na(refGL) and (na(glBroken) or refGL != glBroken)
+        if close < refGL and not aGLon and not startOK
+            filterBlockedDn := true   // ADD-8
         if close < refGL and (aGLon or startOK)
             if not aGLon
                 aGLon := true
@@ -834,14 +983,16 @@ if barstate.isconfirmed
                 aGLbar := bar_index
                 aGLcnt := 0
                 nStarted += 1
+                // ADD-4: Order Block — свеча ПЕРЕД стартом попытки, если она бычья
+                if close[1] > open[1]
+                    aGLobTop := high[1]
+                    aGLobBot := low[1]
+                else
+                    aGLobTop := na
+                    aGLobBot := na
             if close < aGLwick
                 aGLwickOK := true
-            if impDnC
-                aGLcnt := holdBars
-            else if holdDnC
-                aGLcnt += 1
-            else if strictMode
-                aGLcnt := 0
+            aGLcnt := f_holdCnt(aGLcnt, impDnC, holdDnC)
             if aGLcnt >= holdBars and (not needWickOK or aGLwickOK)
                 glBroken := aGLref
                 glBrokenFar := aGLfar
@@ -856,11 +1007,15 @@ if barstate.isconfirmed
                     rtGLstb := aGLbar
                     rtGLtouched := false
                     rtGLfar := aGLfar
+                    rtGLobTop := aGLobTop   // ADD-4
+                    rtGLobBot := aGLobBot
                 else
                     sigGlobDn := true
                     sLvlGlobDn := aGLref
                     sBarGlobDn := aGLbar
                     sFarGlobDn := aGLfar
+                    sObTopGlobDn := aGLobTop   // ADD-4
+                    sObBotGlobDn := aGLobBot
                 aGLon := false
                 aGLcnt := 0
             else if bar_index - aGLbar >= holdWindow
@@ -882,8 +1037,9 @@ if barstate.isconfirmed
     // подтвердился, не считается "касанием"; иначе low этого же бара почти
     // всегда попадает в допуск retestATR, и ретест проходит мгновенно.
     if rtLHon
-        if not rtLHtouched and bar_index > rtLHbar and low <= rtLHlvl + retestATR * atr14
+        if f_retestTouched(rtLHtouched, rtLHbar, rtLHlvl, retestATR * atr14, true)
             rtLHtouched := true
+            retestTouchedUp := true   // ADD-8
         if rtLHtouched and close > rtLHlvl
             sigLocUp := true
             sLvlLocUp := rtLHlvl
@@ -895,8 +1051,9 @@ if barstate.isconfirmed
             nRetestFail += 1
 
     if rtLLon
-        if not rtLLtouched and bar_index > rtLLbar and high >= rtLLlvl - retestATR * atr14
+        if f_retestTouched(rtLLtouched, rtLLbar, rtLLlvl, retestATR * atr14, false)
             rtLLtouched := true
+            retestTouchedDn := true   // ADD-8
         if rtLLtouched and close < rtLLlvl
             sigLocDn := true
             sLvlLocDn := rtLLlvl
@@ -908,26 +1065,32 @@ if barstate.isconfirmed
             nRetestFail += 1
 
     if rtGHon
-        if not rtGHtouched and bar_index > rtGHbar and low <= rtGHlvl + retestATR * atr14
+        if f_retestTouched(rtGHtouched, rtGHbar, rtGHlvl, retestATR * atr14, true)
             rtGHtouched := true
+            retestTouchedUp := true   // ADD-8
         if rtGHtouched and close > rtGHlvl
             sigGlobUp := true
             sLvlGlobUp := rtGHlvl
             sBarGlobUp := rtGHstb
             sFarGlobUp := rtGHfar
+            sObTopGlobUp := rtGHobTop   // ADD-4
+            sObBotGlobUp := rtGHobBot
             rtGHon := false
         else if bar_index - rtGHbar >= retestWindow
             rtGHon := false
             nRetestFail += 1
 
     if rtGLon
-        if not rtGLtouched and bar_index > rtGLbar and high >= rtGLlvl - retestATR * atr14
+        if f_retestTouched(rtGLtouched, rtGLbar, rtGLlvl, retestATR * atr14, false)
             rtGLtouched := true
+            retestTouchedDn := true   // ADD-8
         if rtGLtouched and close < rtGLlvl
             sigGlobDn := true
             sLvlGlobDn := rtGLlvl
             sBarGlobDn := rtGLstb
             sFarGlobDn := rtGLfar
+            sObTopGlobDn := rtGLobTop   // ADD-4
+            sObBotGlobDn := rtGLobBot
             rtGLon := false
         else if bar_index - rtGLbar >= retestWindow
             rtGLon := false
@@ -943,6 +1106,9 @@ if barstate.isconfirmed
         air = false
         if locLastDir == 1 and not na(locLastLvl)
             air := lvl <= locLastLvl
+        // ADD-1: CHoCH — это первый слом ПРОТИВ предыдущего направления (locLastDir
+        // ещё хранит старое значение, до перезаписи ниже); иначе — BOS (продолжение)
+        choch = locLastDir == -1
         locLastDir := 1
         locLastLvl := lvl
         gRef = zGH
@@ -950,20 +1116,25 @@ if barstate.isconfirmed
         // зона ещё и "свежая" (появилась не позже dupWindow баров назад)
         nearGlob = not na(gRef) and math.abs(lvl - gRef) <= dupATR * atr14 and not na(ghBar) and (bar_index - ghBar <= dupWindow)
         // единый скор уверенности вместо зоопарка меток: считаем активные
-        // проверки и сколько из них пройдено
-        emaBad   = useEmaFilter and emaTrend == -1
-        totalChk = 1 + (useEmaFilter ? 1 : 0)
-        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0)
+        // проверки и сколько из них пройдено. EMA больше не участвует в скоре
+        // (REMOVE-2) — осталась чисто визуальным контекстом на графике.
+        htfBad   = useHtfFilter and htfStructDir == -1
+        totalChk = 1 + (useHtfFilter ? 1 : 0)
+        passChk  = (air ? 0 : 1) + (useHtfFilter ? (htfBad ? 0 : 1) : 0)
         full     = passChk == totalChk
         if showLoc and not nearGlob and (full or showWeak)
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
-            txt = "ЛОК↑" + scoreTxt
-            lb = label.new(bar_index, low, txt, style = label.style_label_up, color = color.new(bullCol, full ? 15 : 60), textcolor = color.white, size = size.tiny, tooltip = "ЛОКАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
+            structTag = choch ? "CHoCH" : "BOS"
+            txt = "ЛОК↑ " + structTag + scoreTxt
+            lb = label.new(bar_index, low, txt, style = label.style_label_up, color = color.new(bullCol, full ? 15 : 60), textcolor = color.white, size = size.tiny, tooltip = "ЛОКАЛЬНЫЙ слом (" + structTag + ")\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
             pushSig(lb)   // фикс #4
             locLblUp := lb
             locLblUpBar := bar_index
             sigLocUpShown := true   // фикс #10.2
             locLastDirShown := 1    // фикс #10.9
+            if choch
+                nChoch += 1
+                chochUpShown := true   // ADD-8
             if showBrokenRef
                 locLineUp := line.new(stb, lvl, bar_index, lvl, color = color.new(bullCol, 30), style = line.style_dotted, width = 1)
                 pushLocLine(locLineUp)
@@ -989,23 +1160,28 @@ if barstate.isconfirmed
         air = false
         if locLastDir == -1 and not na(locLastLvl)
             air := lvl >= locLastLvl
+        choch = locLastDir == 1   // ADD-1
         locLastDir := -1
         locLastLvl := lvl
         gRef = zGL
         nearGlob = not na(gRef) and math.abs(lvl - gRef) <= dupATR * atr14 and not na(glBar) and (bar_index - glBar <= dupWindow)
-        emaBad   = useEmaFilter and emaTrend == 1
-        totalChk = 1 + (useEmaFilter ? 1 : 0)
-        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0)
+        htfBad   = useHtfFilter and htfStructDir == 1
+        totalChk = 1 + (useHtfFilter ? 1 : 0)
+        passChk  = (air ? 0 : 1) + (useHtfFilter ? (htfBad ? 0 : 1) : 0)
         full     = passChk == totalChk
         if showLoc and not nearGlob and (full or showWeak)
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
-            txt = "ЛОК↓" + scoreTxt
-            lb = label.new(bar_index, high, txt, style = label.style_label_down, color = color.new(bearCol, full ? 15 : 60), textcolor = color.white, size = size.tiny, tooltip = "ЛОКАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
+            structTag = choch ? "CHoCH" : "BOS"
+            txt = "ЛОК↓ " + structTag + scoreTxt
+            lb = label.new(bar_index, high, txt, style = label.style_label_down, color = color.new(bearCol, full ? 15 : 60), textcolor = color.white, size = size.tiny, tooltip = "ЛОКАЛЬНЫЙ слом (" + structTag + ")\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
             pushSig(lb)
             locLblDn := lb
             locLblDnBar := bar_index
             sigLocDnShown := true   // фикс #10.2
             locLastDirShown := -1   // фикс #10.9
+            if choch
+                nChoch += 1
+                chochDnShown := true   // ADD-8
             if showBrokenRef
                 locLineDn := line.new(stb, lvl, bar_index, lvl, color = color.new(bearCol, 30), style = line.style_dotted, width = 1)
                 pushLocLine(locLineDn)
@@ -1029,6 +1205,7 @@ if barstate.isconfirmed
         air = false
         if globLastDir == 1 and not na(globLastLvl)
             air := lvl <= globLastLvl
+        choch = globLastDir == -1   // ADD-1
         globLastDir := 1
         globLastLvl := lvl
         if not na(locLblUp) and not na(locLblUpBar) and bar_index - locLblUpBar <= dupWindow
@@ -1053,19 +1230,26 @@ if barstate.isconfirmed
                 removeLbl(keptStopTakeLbl, locTPLblUp)
                 label.delete(locTPLblUp)
                 locTPLblUp := na
-        emaBad   = useEmaFilter and emaTrend == -1
-        totalChk = 1 + (useEmaFilter ? 1 : 0)
-        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0)
+        htfBad   = useHtfFilter and htfStructDir == -1
+        totalChk = 1 + (useHtfFilter ? 1 : 0)
+        passChk  = (air ? 0 : 1) + (useHtfFilter ? (htfBad ? 0 : 1) : 0)
         full     = passChk == totalChk
         if showGlob and (full or showWeak)
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
-            txt = "ГЛОБ↑" + scoreTxt
-            glb = label.new(bar_index, low, txt, style = label.style_label_up, color = color.new(bullCol, full ? 0 : 55), textcolor = color.white, size = size.small, tooltip = "ГЛОБАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
+            structTag = choch ? "CHoCH" : "BOS"
+            txt = "ГЛОБ↑ " + structTag + scoreTxt
+            glb = label.new(bar_index, low, txt, style = label.style_label_up, color = color.new(bullCol, full ? 0 : 55), textcolor = color.white, size = size.small, tooltip = "ГЛОБАЛЬНЫЙ слом (" + structTag + ")\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
             pushSig(glb)
             sigGlobUpShown := true   // фикс #10.2
             globLastDirShown := 1    // фикс #10.9
+            if choch
+                nChoch += 1
+                chochUpShown := true   // ADD-8
             if showBrokenRef
                 pushGlobLine(line.new(stb, lvl, bar_index, lvl, color = color.new(bullCol, 10), style = line.style_dashed, width = 1))
+            // ADD-4: Order Block — последняя медвежья свеча перед стартом попытки
+            if useOB and not na(sObTopGlobUp)
+                pushOBBox(box.new(stb - 1, sObTopGlobUp, bar_index + obProjLen, sObBotGlobUp, border_color = color.new(bullCol, 30), bgcolor = color.new(bullCol, 82), border_width = 1))
         // фикс #9: стоп/тейк только для реально засчитанного сигнала (скор-фильтр)
         if showStopTake and (full or showWeak)
             stopLvl = sFarGlobUp - slBufferViz * atr14
@@ -1083,6 +1267,7 @@ if barstate.isconfirmed
         air = false
         if globLastDir == -1 and not na(globLastLvl)
             air := lvl >= globLastLvl
+        choch = globLastDir == 1   // ADD-1
         globLastDir := -1
         globLastLvl := lvl
         if not na(locLblDn) and not na(locLblDnBar) and bar_index - locLblDnBar <= dupWindow
@@ -1105,19 +1290,26 @@ if barstate.isconfirmed
                 removeLbl(keptStopTakeLbl, locTPLblDn)
                 label.delete(locTPLblDn)
                 locTPLblDn := na
-        emaBad   = useEmaFilter and emaTrend == 1
-        totalChk = 1 + (useEmaFilter ? 1 : 0)
-        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0)
+        htfBad   = useHtfFilter and htfStructDir == 1
+        totalChk = 1 + (useHtfFilter ? 1 : 0)
+        passChk  = (air ? 0 : 1) + (useHtfFilter ? (htfBad ? 0 : 1) : 0)
         full     = passChk == totalChk
         if showGlob and (full or showWeak)
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
-            txt = "ГЛОБ↓" + scoreTxt
-            glb = label.new(bar_index, high, txt, style = label.style_label_down, color = color.new(bearCol, full ? 0 : 55), textcolor = color.white, size = size.small, tooltip = "ГЛОБАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
+            structTag = choch ? "CHoCH" : "BOS"
+            txt = "ГЛОБ↓ " + structTag + scoreTxt
+            glb = label.new(bar_index, high, txt, style = label.style_label_down, color = color.new(bearCol, full ? 0 : 55), textcolor = color.white, size = size.small, tooltip = "ГЛОБАЛЬНЫЙ слом (" + structTag + ")\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
             pushSig(glb)
             sigGlobDnShown := true   // фикс #10.2
             globLastDirShown := -1   // фикс #10.9
+            if choch
+                nChoch += 1
+                chochDnShown := true   // ADD-8
             if showBrokenRef
                 pushGlobLine(line.new(stb, lvl, bar_index, lvl, color = color.new(bearCol, 10), style = line.style_dashed, width = 1))
+            // ADD-4: Order Block — последняя бычья свеча перед стартом попытки
+            if useOB and not na(sObTopGlobDn)
+                pushOBBox(box.new(stb - 1, sObTopGlobDn, bar_index + obProjLen, sObBotGlobDn, border_color = color.new(bearCol, 30), bgcolor = color.new(bearCol, 82), border_width = 1))
         // фикс #9: см. блок ГЛОБ↑ — стоп/тейк только для реально засчитанного сигнала
         if showStopTake and (full or showWeak)
             stopLvl = sFarGlobDn + slBufferViz * atr14
@@ -1164,7 +1356,6 @@ if (showTrend or showFunnel) and barstate.islast
 
     if showFunnel
         conv = nStarted > 0 ? 100.0 * (nLocSlom + nGlobSlom) / nStarted : na
-        lost = nStarted - nFailBack - nFailWindow - nRebind - nLocSlom - nGlobSlom - nRetestFail
         table.cell(tp, 0, 4, "ВОРОНКА", text_size = size.tiny, text_color = txtC, bgcolor = hdrBg)
         table.cell(tp, 1, 4, str.tostring(bar_index + 1) + " баров", text_size = size.tiny, text_color = txtC, bgcolor = hdrBg)
         table.cell(tp, 0, 5, "Пробоев начато", text_size = size.tiny, text_color = txtC)
@@ -1173,10 +1364,13 @@ if (showTrend or showFunnel) and barstate.islast
         table.cell(tp, 1, 6, str.tostring(nFailBack), text_size = size.tiny, text_color = txtC)
         table.cell(tp, 0, 7, "Окно закрепа истекло", text_size = size.tiny, text_color = txtC)
         table.cell(tp, 1, 7, str.tostring(nFailWindow), text_size = size.tiny, text_color = txtC)
-        table.cell(tp, 0, 8, "Перепривязка / невязка", text_size = size.tiny, text_color = txtC)
-        table.cell(tp, 1, 8, str.tostring(nRebind) + " / " + str.tostring(lost), text_size = size.tiny, text_color = lost != 0 ? color.orange : txtC)
-        table.cell(tp, 0, 9, "Уровней «воскресло»", text_size = size.tiny, text_color = txtC)
-        table.cell(tp, 1, 9, str.tostring(nReborn), text_size = size.tiny, text_color = txtC)
+        // REMOVE-3: nRebind/nReborn/"невязка" были диагностикой для аудита самого
+        // скрипта, а не для трейдера на графике — убраны. Освободившиеся строки
+        // отданы под CHoCH/BOS (ADD-1) и счётчик sweep (ADD-3).
+        table.cell(tp, 0, 8, "CHoCH / BOS", text_size = size.tiny, text_color = txtC)
+        table.cell(tp, 1, 8, str.tostring(nChoch) + " / " + str.tostring(nLocSlom + nGlobSlom - nChoch), text_size = size.tiny, text_color = txtC)
+        table.cell(tp, 0, 9, "Снятие ликвидности (sweep)", text_size = size.tiny, text_color = txtC)
+        table.cell(tp, 1, 9, str.tostring(nSweep), text_size = size.tiny, text_color = txtC)
         if useRetest
             table.cell(tp, 0, 10, "Ретест: не подтверждено", text_size = size.tiny, text_color = txtC)
             table.cell(tp, 1, 10, str.tostring(nRetestFail), text_size = size.tiny, text_color = txtC)
@@ -1191,3 +1385,11 @@ alertcondition(sigGlobUpShown, "Глобальный слом ВВЕРХ", "Сл
 alertcondition(sigGlobDnShown, "Глобальный слом ВНИЗ",  "Слом: глобальный ВНИЗ")
 alertcondition(sigLocUpShown,  "Локальный слом ВВЕРХ",  "Слом: локальный ВВЕРХ")
 alertcondition(sigLocDnShown,  "Локальный слом ВНИЗ",   "Слом: локальный ВНИЗ")
+
+// ADD-8: гранулярные алерты — CHoCH, ранний хедз-ап по ретесту, блокировка фильтром
+alertcondition(chochUpShown,    "CHoCH ВВЕРХ",  "Смена характера: разворот вверх")
+alertcondition(chochDnShown,    "CHoCH ВНИЗ",   "Смена характера: разворот вниз")
+alertcondition(retestTouchedUp, "Ретест: уровень достигнут (вверх)", "Ретест: цена вернулась к пробитому уровню, ждём отбоя вверх")
+alertcondition(retestTouchedDn, "Ретест: уровень достигнут (вниз)",  "Ретест: цена вернулась к пробитому уровню, ждём отбоя вниз")
+alertcondition(filterBlockedUp, "Попытка вверх заблокирована фильтром", "Пробой вверх произошёл, но новая попытка не стартовала — сессия/сквиз")
+alertcondition(filterBlockedDn, "Попытка вниз заблокирована фильтром",  "Пробой вниз произошёл, но новая попытка не стартовала — сессия/сквиз")
