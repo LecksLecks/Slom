@@ -5,6 +5,15 @@
 // Бэктест на BTCUSDT показал 11% win rate / PF 0.375 на чистом сигнале —
 // правки ниже отвечают на это, а не косметика ради косметики.
 //
+// ФИКС #9 (повторный аудит v11): визуализация стоп/тейка (группа "9.") рисовалась
+// для ЛЮБОЙ попытки закрепа — включая подавленные как дубль ГЛОБ-уровня (nearGlob)
+// и слабые по скору при выключенном showWeak, то есть уровни, для которых даже
+// метка сигнала не выводится. Из-за этого стоп/тейк на графике не совпадал ни с
+// видимыми сигналами, ни с тем, что взяла бы в сделку strategy-компаньон (как
+// заявлено в описании группы "9." ниже). Теперь showStopTake проверяет то же
+// условие, что и показ метки: not nearGlob and (full or showWeak) для ЛОК,
+// (full or showWeak) для ГЛОБ.
+//
 // УБРАНО:
 //   - Ловушка старшего ТФ (была грубой прокси через один пивот, не структура —
 //     удалена целиком вместе с request.security)
@@ -871,7 +880,10 @@ if barstate.isconfirmed
             locLblUpBar := bar_index
             if showBrokenRef
                 pushLocLine(line.new(stb, lvl, bar_index, lvl, color = color.new(bullCol, 30), style = line.style_dotted, width = 1))
-        if showStopTake
+        // фикс #9: стоп/тейк рисуем только для реально засчитанных сигналов
+        // (не дубль глобала, проходит скор-фильтр) — иначе уровни не совпадают
+        // с тем, что показывает label, и с тем, что взяла бы strategy-компаньон
+        if showStopTake and not nearGlob and (full or showWeak)
             stopLvl = sFarLocUp - slBufferViz * atr14
             stopDist = close - stopLvl
             if stopDist > 0
@@ -904,7 +916,8 @@ if barstate.isconfirmed
             locLblDnBar := bar_index
             if showBrokenRef
                 pushLocLine(line.new(stb, lvl, bar_index, lvl, color = color.new(bearCol, 30), style = line.style_dotted, width = 1))
-        if showStopTake
+        // фикс #9: см. блок ЛОК↑ — стоп/тейк только для реально засчитанного сигнала
+        if showStopTake and not nearGlob and (full or showWeak)
             stopLvl = sFarLocDn + slBufferViz * atr14
             stopDist = stopLvl - close
             if stopDist > 0
@@ -937,7 +950,8 @@ if barstate.isconfirmed
             pushSig(glb)
             if showBrokenRef
                 pushGlobLine(line.new(stb, lvl, bar_index, lvl, color = color.new(bullCol, 10), style = line.style_dashed, width = 1))
-        if showStopTake
+        // фикс #9: стоп/тейк только для реально засчитанного сигнала (скор-фильтр)
+        if showStopTake and (full or showWeak)
             stopLvl = sFarGlobUp - slBufferViz * atr14
             stopDist = close - stopLvl
             if stopDist > 0
@@ -970,7 +984,8 @@ if barstate.isconfirmed
             pushSig(glb)
             if showBrokenRef
                 pushGlobLine(line.new(stb, lvl, bar_index, lvl, color = color.new(bearCol, 10), style = line.style_dashed, width = 1))
-        if showStopTake
+        // фикс #9: см. блок ГЛОБ↑ — стоп/тейк только для реально засчитанного сигнала
+        if showStopTake and (full or showWeak)
             stopLvl = sFarGlobDn + slBufferViz * atr14
             stopDist = stopLvl - close
             if stopDist > 0
