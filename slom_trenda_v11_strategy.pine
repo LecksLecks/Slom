@@ -1,0 +1,582 @@
+//@version=6
+// =============================================================================
+// СЛОМ ТРЕНДА (по методичке) v11 — STRATEGY-КОМПАНЬОН (ADD-6)
+//
+// Облегчённая версия ядра индикатора slom_trenda_v11.pine — БЕЗ визуального
+// шума (пивоты/EQH-EQL/sweep/OB/FVG/панели), но с ТОЙ ЖЕ логикой структуры,
+// закрепа, дедупа ЛОК/ГЛОБ и скора (air + опционально HTF), чтобы бэктест
+// отражал именно то, что индикатор реально показывает как "полный" сигнал —
+// а не отдельную, разошедшуюся со временем копию.
+//
+// Стоп/тейк считаются той же формулой, что и группа "9." индикатора:
+// стоп — за дальней границей сломанной зоны + буфер ATR, тейк — по R:R.
+// process_orders_on_close=true — ордер исполняется по close бара сигнала,
+// тем же баром, что использован для расчёта стоп/тейка (без рассинхрона
+// между ценой входа в формуле и фактической ценой исполнения).
+//
+// Что сознательно НЕ перенесено из индикатора (не влияет на то, ЧТО
+// торгуется, только на визуализацию): экстремумы/EQH-EQL/sweep/OB/FVG,
+// MACD (уже убран из индикатора), панель тренда/воронки.
+// =============================================================================
+strategy("Слом тренда (по методичке) v11 — Strategy", "СЛОМ v11 STR",
+     overlay = true, initial_capital = 10000, currency = currency.USD,
+     default_qty_type = strategy.percent_of_equity, default_qty_value = 10,
+     commission_type = strategy.commission.percent, commission_value = 0.05,
+     process_orders_on_close = true,
+     max_boxes_count = 50, max_lines_count = 50, max_labels_count = 50)
+
+// ─────────────────────────────────────────────────────────────────────────────
+G1 = "1. Структура"
+locLB  = input.int(5,  "Локальный хай/лой: lookback", minval = 2, group = G1)
+globLB = input.int(20, "Глобальный хай/лой: lookback", minval = 3, group = G1)
+
+G2 = "2. Закреп"
+refMode    = input.string("Тело + подтверждение тенью", "Точка отсчёта пробоя", options = ["Конец тени (строго)", "Тело (мягко, слом внутри зоны)", "Тело + подтверждение тенью"], group = G2)
+useImpulse = input.bool(true, "Импульсный закреп (одна свеча)", group = G2)
+impulseATR = input.float(1.0, "Импульс: тело ≥ × ATR14", minval = 0.3, step = 0.1, group = G2)
+strictMode = input.bool(true, "Полнотелые — строго ПОДРЯД", group = G2)
+holdBars   = input.int(2, "Полнотелых свечей за зоной", minval = 1, maxval = 10, group = G2)
+holdWindow = input.int(8, "Окно закрепа, баров", minval = 2, group = G2)
+bodyRatio  = input.float(0.5, "Полнотелая свеча: тело ≥ доля диапазона", minval = 0.1, maxval = 1.0, step = 0.05, group = G2)
+requireDir = input.bool(true, "Свечи закрепа — в сторону слома", group = G2)
+
+G3 = "3. Дубли ЛОК/ГЛОБ"
+dupATR    = input.float(0.5, "Уровни считать одним, если ближе × ATR14", minval = 0.0, step = 0.1, group = G3)
+dupWindow = input.int(10, "Глобальная зона считается «свежей» в пределах, баров", minval = 0, group = G3)
+
+G6 = "4. Доп. фильтры (ложные сломы)"
+useVolFilter = input.bool(false, "Фильтр по объёму", group = G6)
+volLen       = input.int(20, "Объём: период SMA", minval = 2, group = G6)
+volMult      = input.float(1.2, "Объём: множитель от SMA", minval = 0.1, step = 0.1, group = G6)
+
+useRetest     = input.bool(false, "Требовать ретест с отбоем перед сигналом", group = G6)
+retestATR     = input.float(1.0, "Ретест: допуск от уровня, × ATR14", minval = 0.1, step = 0.1, group = G6)
+retestWindow  = input.int(10, "Ретест: окно ожидания, баров", minval = 2, group = G6)
+
+useSession = input.bool(false, "Фильтр по сессии — не начинать пробой вне сессии", group = G6)
+sessTime   = input.session("0800-2200", "Разрешённая сессия (UTC)", group = G6)
+
+useSqueezeFilter = input.bool(false, "Фильтр сжатия волатильности — не начинать пробой в сквизе", group = G6)
+atrSmaLen        = input.int(50, "Волатильность: период средней ATR", minval = 5, group = G6)
+squeezeMult      = input.float(0.7, "Сквиз, если ATR14 < × средней ATR", minval = 0.1, step = 0.05, group = G6)
+
+G7 = "5. HTF-контекст"
+useHtfFilter = input.bool(false, "Слом против HTF-структуры — снижает скор", group = G7)
+htfTF        = input.timeframe("240", "Старший ТФ", group = G7)
+htfLB        = input.int(10, "HTF: lookback пивота", minval = 2, group = G7)
+
+G8 = "6. Что торговать"
+tradeLoc      = input.bool(true,  "Торговать ЛОКАЛЬНЫЕ сломы", group = G8)
+tradeGlob     = input.bool(true,  "Торговать ГЛОБАЛЬНЫЕ сломы", group = G8)
+tradeWeak     = input.bool(false, "Торговать и слабые сигналы (скор ниже полного)", group = G8)
+tradeBos      = input.bool(true,  "Торговать BOS (продолжение структуры)", group = G8)
+tradeChoch    = input.bool(true,  "Торговать CHoCH (разворот структуры)", group = G8)
+allowMultiple = input.bool(false, "Разрешить новую сделку, пока текущая открыта", group = G8)
+
+G9 = "7. Стоп/тейк"
+rrRatio  = input.float(3.0, "R:R", minval = 0.5, step = 0.5, group = G9)
+slBuffer = input.float(0.3, "Стоп: доп. буфер за зоной, × ATR14", minval = 0, step = 0.1, group = G9)
+
+strictRef  = refMode == "Конец тени (строго)"
+needWickOK = refMode == "Тело + подтверждение тенью"
+
+// ─────────────────────────────────────────────────────────────────────────────
+f_htfStructDir() =>
+    var float prevPH = na
+    var float prevPL = na
+    var int   dir = 0
+    ph = ta.pivothigh(high, htfLB, htfLB)
+    pl = ta.pivotlow(low, htfLB, htfLB)
+    if not na(ph)
+        dir := not na(prevPH) and ph > prevPH ? 1 : not na(prevPH) ? -1 : dir
+        prevPH := ph
+    if not na(pl)
+        dir := not na(prevPL) and pl < prevPL ? -1 : not na(prevPL) ? 1 : dir
+        prevPL := pl
+    dir
+
+htfStructDir = request.security(syminfo.tickerid, htfTF, f_htfStructDir(), lookahead = barmerge.lookahead_off)
+
+atr14 = ta.atr(14)
+
+phLoc  = ta.pivothigh(high, locLB,  locLB)
+plLoc  = ta.pivotlow(low,   locLB,  locLB)
+phGlob = ta.pivothigh(high, globLB, globLB)
+plGlob = ta.pivotlow(low,   globLB, globLB)
+
+bodySz   = math.abs(close - open)
+rng      = high - low
+fullBody = rng > 0 and bodySz / rng >= bodyRatio
+impBody  = bodySz >= impulseATR * atr14
+
+volOK = not useVolFilter or na(volume) or volume >= ta.sma(volume, volLen) * volMult
+
+holdUpC = fullBody and (not requireDir or close > open) and volOK
+holdDnC = fullBody and (not requireDir or close < open) and volOK
+impUpC  = useImpulse and impBody and close > open and volOK
+impDnC  = useImpulse and impBody and close < open and volOK
+
+sessOK = not useSession or not na(time(timeframe.period, sessTime, "UTC"))
+
+atrSMA    = ta.sma(atr14, atrSmaLen)
+squeezeOK = not useSqueezeFilter or na(atrSMA) or atr14 >= atrSMA * squeezeMult
+
+startOK = sessOK and squeezeOK
+
+f_holdCnt(cnt, impulse, hold) =>
+    impulse ? holdBars : hold ? cnt + 1 : strictMode ? 0 : cnt
+
+f_rebind(z, ref, isHigh) =>
+    not na(z) and (isHigh ? z > ref : z < ref)
+
+f_retestTouched(touched, startBar, lvl, tol, isHigh) =>
+    not touched and bar_index > startBar and (isHigh ? low <= lvl + tol : high >= lvl - tol)
+
+// ЗОНЫ ------------------------------------------------------------------------
+var float prevLocPH = na
+var float prevLocPL = na
+var float prevGlobPH = na
+var float prevGlobPL = na
+
+var float lhTop = na
+var float lhBot = na
+var float ghTop = na
+var float ghBot = na
+var float llBot = na
+var float llTop = na
+var float glBot = na
+var float glTop = na
+var int   ghBar = na
+var int   glBar = na
+
+// ПОПЫТКИ ---------------------------------------------------------------------
+var bool  aLHon = false
+var float aLHref = na
+var float aLHfar = na
+var float aLHwick = na
+var bool  aLHwickOK = false
+var int   aLHbar = na
+var int   aLHcnt = 0
+
+var bool  aGHon = false
+var float aGHref = na
+var float aGHfar = na
+var float aGHwick = na
+var bool  aGHwickOK = false
+var int   aGHbar = na
+var int   aGHcnt = 0
+
+var bool  aLLon = false
+var float aLLref = na
+var float aLLfar = na
+var float aLLwick = na
+var bool  aLLwickOK = false
+var int   aLLbar = na
+var int   aLLcnt = 0
+
+var bool  aGLon = false
+var float aGLref = na
+var float aGLfar = na
+var float aGLwick = na
+var bool  aGLwickOK = false
+var int   aGLbar = na
+var int   aGLcnt = 0
+
+var float lhBroken = na
+var float lhBrokenFar = na
+var float ghBroken = na
+var float ghBrokenFar = na
+var float llBroken = na
+var float llBrokenFar = na
+var float glBroken = na
+var float glBrokenFar = na
+
+var int   locLastDir = 0
+var float locLastLvl = na
+var int   globLastDir = 0
+var float globLastLvl = na
+
+var bool  rtLHon = false
+var float rtLHlvl = na
+var int   rtLHbar = na
+var int   rtLHstb = na
+var bool  rtLHtouched = false
+var float rtLHfar = na
+
+var bool  rtLLon = false
+var float rtLLlvl = na
+var int   rtLLbar = na
+var int   rtLLstb = na
+var bool  rtLLtouched = false
+var float rtLLfar = na
+
+var bool  rtGHon = false
+var float rtGHlvl = na
+var int   rtGHbar = na
+var int   rtGHstb = na
+var bool  rtGHtouched = false
+var float rtGHfar = na
+
+var bool  rtGLon = false
+var float rtGLlvl = na
+var int   rtGLbar = na
+var int   rtGLstb = na
+var bool  rtGLtouched = false
+var float rtGLfar = na
+
+bool sigLocUp  = false
+bool sigLocDn  = false
+bool sigGlobUp = false
+bool sigGlobDn = false
+
+float sLvlLocUp = na
+int   sBarLocUp = na
+float sFarLocUp = na
+float sLvlLocDn = na
+int   sBarLocDn = na
+float sFarLocDn = na
+float sLvlGlobUp = na
+int   sBarGlobUp = na
+float sFarGlobUp = na
+float sLvlGlobDn = na
+int   sBarGlobDn = na
+float sFarGlobDn = na
+
+if barstate.isconfirmed
+    // ===== ЗОНЫ ==============================================================
+    if not na(phLoc)
+        prevLocPH := phLoc
+        lhTop := high[locLB]
+        lhBot := math.max(open[locLB], close[locLB])
+    if not na(plLoc)
+        prevLocPL := plLoc
+        llBot := low[locLB]
+        llTop := math.min(open[locLB], close[locLB])
+    if not na(phGlob)
+        prevGlobPH := phGlob
+        ghTop := high[globLB]
+        ghBot := math.max(open[globLB], close[globLB])
+        ghBar := bar_index
+    if not na(plGlob)
+        prevGlobPL := plGlob
+        glBot := low[globLB]
+        glTop := math.min(open[globLB], close[globLB])
+        glBar := bar_index
+
+    // ===== СБРОС «УЖЕ СЛОМАН» ================================================
+    if not na(lhBroken) and not na(lhBrokenFar) and close < lhBrokenFar
+        lhBroken := na
+        lhBrokenFar := na
+        if rtLHon
+            rtLHon := false
+    if not na(ghBroken) and not na(ghBrokenFar) and close < ghBrokenFar
+        ghBroken := na
+        ghBrokenFar := na
+        if rtGHon
+            rtGHon := false
+    if not na(llBroken) and not na(llBrokenFar) and close > llBrokenFar
+        llBroken := na
+        llBrokenFar := na
+        if rtLLon
+            rtLLon := false
+    if not na(glBroken) and not na(glBrokenFar) and close > glBrokenFar
+        glBroken := na
+        glBrokenFar := na
+        if rtGLon
+            rtGLon := false
+
+    zLH = strictRef ? lhTop : lhBot
+    zGH = strictRef ? ghTop : ghBot
+    zLL = strictRef ? llBot : llTop
+    zGL = strictRef ? glBot : glTop
+
+    // ===== ПЕРЕПРИВЯЗКА ======================================================
+    if aLHon and f_rebind(zLH, aLHref, true)
+        aLHon := false
+        aLHcnt := 0
+    if aGHon and f_rebind(zGH, aGHref, true)
+        aGHon := false
+        aGHcnt := 0
+    if aLLon and f_rebind(zLL, aLLref, false)
+        aLLon := false
+        aLLcnt := 0
+    if aGLon and f_rebind(zGL, aGLref, false)
+        aGLon := false
+        aGLcnt := 0
+
+    // ===== ЗАКРЕП ============================================================
+    refLH = aLHon ? aLHref : zLH
+    if not na(refLH) and (na(lhBroken) or refLH != lhBroken)
+        if close > refLH and (aLHon or startOK)
+            if not aLHon
+                aLHon := true
+                aLHref := refLH
+                aLHfar := lhBot
+                aLHwick := lhTop
+                aLHwickOK := false
+                aLHbar := bar_index
+                aLHcnt := 0
+            if close > aLHwick
+                aLHwickOK := true
+            aLHcnt := f_holdCnt(aLHcnt, impUpC, holdUpC)
+            if aLHcnt >= holdBars and (not needWickOK or aLHwickOK)
+                lhBroken := aLHref
+                lhBrokenFar := aLHfar
+                if useRetest
+                    rtLHon := true
+                    rtLHlvl := aLHref
+                    rtLHbar := bar_index
+                    rtLHstb := aLHbar
+                    rtLHtouched := false
+                    rtLHfar := aLHfar
+                else
+                    sigLocUp := true
+                    sLvlLocUp := aLHref
+                    sBarLocUp := aLHbar
+                    sFarLocUp := aLHfar
+                aLHon := false
+                aLHcnt := 0
+            else if bar_index - aLHbar >= holdWindow
+                aLHon := false
+                aLHcnt := 0
+        else
+            aLHon := false
+            aLHcnt := 0
+
+    refLL = aLLon ? aLLref : zLL
+    if not na(refLL) and (na(llBroken) or refLL != llBroken)
+        if close < refLL and (aLLon or startOK)
+            if not aLLon
+                aLLon := true
+                aLLref := refLL
+                aLLfar := llTop
+                aLLwick := llBot
+                aLLwickOK := false
+                aLLbar := bar_index
+                aLLcnt := 0
+            if close < aLLwick
+                aLLwickOK := true
+            aLLcnt := f_holdCnt(aLLcnt, impDnC, holdDnC)
+            if aLLcnt >= holdBars and (not needWickOK or aLLwickOK)
+                llBroken := aLLref
+                llBrokenFar := aLLfar
+                if useRetest
+                    rtLLon := true
+                    rtLLlvl := aLLref
+                    rtLLbar := bar_index
+                    rtLLstb := aLLbar
+                    rtLLtouched := false
+                    rtLLfar := aLLfar
+                else
+                    sigLocDn := true
+                    sLvlLocDn := aLLref
+                    sBarLocDn := aLLbar
+                    sFarLocDn := aLLfar
+                aLLon := false
+                aLLcnt := 0
+            else if bar_index - aLLbar >= holdWindow
+                aLLon := false
+                aLLcnt := 0
+        else
+            aLLon := false
+            aLLcnt := 0
+
+    refGH = aGHon ? aGHref : zGH
+    if not na(refGH) and (na(ghBroken) or refGH != ghBroken)
+        if close > refGH and (aGHon or startOK)
+            if not aGHon
+                aGHon := true
+                aGHref := refGH
+                aGHfar := ghBot
+                aGHwick := ghTop
+                aGHwickOK := false
+                aGHbar := bar_index
+                aGHcnt := 0
+            if close > aGHwick
+                aGHwickOK := true
+            aGHcnt := f_holdCnt(aGHcnt, impUpC, holdUpC)
+            if aGHcnt >= holdBars and (not needWickOK or aGHwickOK)
+                ghBroken := aGHref
+                ghBrokenFar := aGHfar
+                if useRetest
+                    rtGHon := true
+                    rtGHlvl := aGHref
+                    rtGHbar := bar_index
+                    rtGHstb := aGHbar
+                    rtGHtouched := false
+                    rtGHfar := aGHfar
+                else
+                    sigGlobUp := true
+                    sLvlGlobUp := aGHref
+                    sBarGlobUp := aGHbar
+                    sFarGlobUp := aGHfar
+                aGHon := false
+                aGHcnt := 0
+            else if bar_index - aGHbar >= holdWindow
+                aGHon := false
+                aGHcnt := 0
+        else
+            aGHon := false
+            aGHcnt := 0
+
+    refGL = aGLon ? aGLref : zGL
+    if not na(refGL) and (na(glBroken) or refGL != glBroken)
+        if close < refGL and (aGLon or startOK)
+            if not aGLon
+                aGLon := true
+                aGLref := refGL
+                aGLfar := glTop
+                aGLwick := glBot
+                aGLwickOK := false
+                aGLbar := bar_index
+                aGLcnt := 0
+            if close < aGLwick
+                aGLwickOK := true
+            aGLcnt := f_holdCnt(aGLcnt, impDnC, holdDnC)
+            if aGLcnt >= holdBars and (not needWickOK or aGLwickOK)
+                glBroken := aGLref
+                glBrokenFar := aGLfar
+                if useRetest
+                    rtGLon := true
+                    rtGLlvl := aGLref
+                    rtGLbar := bar_index
+                    rtGLstb := aGLbar
+                    rtGLtouched := false
+                    rtGLfar := aGLfar
+                else
+                    sigGlobDn := true
+                    sLvlGlobDn := aGLref
+                    sBarGlobDn := aGLbar
+                    sFarGlobDn := aGLfar
+                aGLon := false
+                aGLcnt := 0
+            else if bar_index - aGLbar >= holdWindow
+                aGLon := false
+                aGLcnt := 0
+        else
+            aGLon := false
+            aGLcnt := 0
+
+    // ===== РЕТЕСТ ============================================================
+    if rtLHon
+        if f_retestTouched(rtLHtouched, rtLHbar, rtLHlvl, retestATR * atr14, true)
+            rtLHtouched := true
+        if rtLHtouched and close > rtLHlvl
+            sigLocUp := true
+            sLvlLocUp := rtLHlvl
+            sBarLocUp := rtLHstb
+            sFarLocUp := rtLHfar
+            rtLHon := false
+        else if bar_index - rtLHbar >= retestWindow
+            rtLHon := false
+
+    if rtLLon
+        if f_retestTouched(rtLLtouched, rtLLbar, rtLLlvl, retestATR * atr14, false)
+            rtLLtouched := true
+        if rtLLtouched and close < rtLLlvl
+            sigLocDn := true
+            sLvlLocDn := rtLLlvl
+            sBarLocDn := rtLLstb
+            sFarLocDn := rtLLfar
+            rtLLon := false
+        else if bar_index - rtLLbar >= retestWindow
+            rtLLon := false
+
+    if rtGHon
+        if f_retestTouched(rtGHtouched, rtGHbar, rtGHlvl, retestATR * atr14, true)
+            rtGHtouched := true
+        if rtGHtouched and close > rtGHlvl
+            sigGlobUp := true
+            sLvlGlobUp := rtGHlvl
+            sBarGlobUp := rtGHstb
+            sFarGlobUp := rtGHfar
+            rtGHon := false
+        else if bar_index - rtGHbar >= retestWindow
+            rtGHon := false
+
+    if rtGLon
+        if f_retestTouched(rtGLtouched, rtGLbar, rtGLlvl, retestATR * atr14, false)
+            rtGLtouched := true
+        if rtGLtouched and close < rtGLlvl
+            sigGlobDn := true
+            sLvlGlobDn := rtGLlvl
+            sBarGlobDn := rtGLstb
+            sFarGlobDn := rtGLfar
+            rtGLon := false
+        else if bar_index - rtGLbar >= retestWindow
+            rtGLon := false
+
+    // ===== СЛОМЫ → СДЕЛКИ ====================================================
+    canEnter = allowMultiple or strategy.position_size == 0
+
+    if sigLocUp
+        air = locLastDir == 1 and not na(locLastLvl) and sLvlLocUp <= locLastLvl
+        choch = locLastDir == -1
+        locLastDir := 1
+        locLastLvl := sLvlLocUp
+        gRef = zGH
+        nearGlob = not na(gRef) and math.abs(sLvlLocUp - gRef) <= dupATR * atr14 and not na(ghBar) and (bar_index - ghBar <= dupWindow)
+        htfBad = useHtfFilter and htfStructDir == -1
+        full = not air and (not useHtfFilter or not htfBad)
+        structOK = choch ? tradeChoch : tradeBos
+        if tradeLoc and not nearGlob and structOK and (full or tradeWeak) and canEnter
+            stopLvl = sFarLocUp - slBuffer * atr14
+            stopDist = close - stopLvl
+            if stopDist > 0
+                takeLvl = close + stopDist * rrRatio
+                strategy.entry("LOC-L", strategy.long, comment = choch ? "CHoCH" : "BOS")
+                strategy.exit("LOC-L-X", "LOC-L", stop = stopLvl, limit = takeLvl)
+
+    if sigLocDn
+        air = locLastDir == -1 and not na(locLastLvl) and sLvlLocDn >= locLastLvl
+        choch = locLastDir == 1
+        locLastDir := -1
+        locLastLvl := sLvlLocDn
+        gRef = zGL
+        nearGlob = not na(gRef) and math.abs(sLvlLocDn - gRef) <= dupATR * atr14 and not na(glBar) and (bar_index - glBar <= dupWindow)
+        htfBad = useHtfFilter and htfStructDir == 1
+        full = not air and (not useHtfFilter or not htfBad)
+        structOK = choch ? tradeChoch : tradeBos
+        if tradeLoc and not nearGlob and structOK and (full or tradeWeak) and canEnter
+            stopLvl = sFarLocDn + slBuffer * atr14
+            stopDist = stopLvl - close
+            if stopDist > 0
+                takeLvl = close - stopDist * rrRatio
+                strategy.entry("LOC-S", strategy.short, comment = choch ? "CHoCH" : "BOS")
+                strategy.exit("LOC-S-X", "LOC-S", stop = stopLvl, limit = takeLvl)
+
+    if sigGlobUp
+        air = globLastDir == 1 and not na(globLastLvl) and sLvlGlobUp <= globLastLvl
+        choch = globLastDir == -1
+        globLastDir := 1
+        globLastLvl := sLvlGlobUp
+        htfBad = useHtfFilter and htfStructDir == -1
+        full = not air and (not useHtfFilter or not htfBad)
+        structOK = choch ? tradeChoch : tradeBos
+        if tradeGlob and structOK and (full or tradeWeak) and canEnter
+            stopLvl = sFarGlobUp - slBuffer * atr14
+            stopDist = close - stopLvl
+            if stopDist > 0
+                takeLvl = close + stopDist * rrRatio
+                strategy.entry("GLOB-L", strategy.long, comment = choch ? "CHoCH" : "BOS")
+                strategy.exit("GLOB-L-X", "GLOB-L", stop = stopLvl, limit = takeLvl)
+
+    if sigGlobDn
+        air = globLastDir == -1 and not na(globLastLvl) and sLvlGlobDn >= globLastLvl
+        choch = globLastDir == 1
+        globLastDir := -1
+        globLastLvl := sLvlGlobDn
+        htfBad = useHtfFilter and htfStructDir == 1
+        full = not air and (not useHtfFilter or not htfBad)
+        structOK = choch ? tradeChoch : tradeBos
+        if tradeGlob and structOK and (full or tradeWeak) and canEnter
+            stopLvl = sFarGlobDn + slBuffer * atr14
+            stopDist = stopLvl - close
+            if stopDist > 0
+                takeLvl = close - stopDist * rrRatio
+                strategy.entry("GLOB-S", strategy.short, comment = choch ? "CHoCH" : "BOS")
+                strategy.exit("GLOB-S-X", "GLOB-S", stop = stopLvl, limit = takeLvl)
+
+// ─────────────────────────────────────────────────────────────────────────────
+plot(ta.ema(close, 50),  "EMA 50",  color = color.new(#ffb74d, 0))
+plot(ta.ema(close, 200), "EMA 200", color = color.new(#7e57c2, 0), linewidth = 2)
