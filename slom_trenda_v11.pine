@@ -11,8 +11,36 @@
 // метка сигнала не выводится. Из-за этого стоп/тейк на графике не совпадал ни с
 // видимыми сигналами, ни с тем, что взяла бы в сделку strategy-компаньон (как
 // заявлено в описании группы "9." ниже). Теперь showStopTake проверяет то же
-// условие, что и показ метки: not nearGlob and (full or showWeak) для ЛОК,
-// (full or showWeak) для ГЛОБ.
+// условие дедупликации/скор-фильтра, что определяет видимость метки:
+// not nearGlob and (full or showWeak) для ЛОК, (full or showWeak) для ГЛОБ.
+// (Тумблеры showLoc/showGlob при этом намеренно НЕ участвуют — это отдельный,
+// независимый переключатель именно видимости метки, а не качества сигнала.)
+//
+// ФИКС #10 (второй раунд аудита):
+//   1. Ретест (фильтр C, useRetest) фактически не работал: условие "касания"
+//      уровня (touched) проверялось в ТОТ ЖЕ бар, что и старт ретеста, а low
+//      этого бара почти всегда лежит в пределах retestATR от уровня — touched
+//      становился true мгновенно, и сигнал срабатывал в тот же бар без
+//      реального ожидания отката. Добавлено условие bar_index > rtXXbar —
+//      "касание" теперь может засчитаться только НАЧИНАЯ со следующего бара.
+//   2. alertcondition() слушал сырые sigLocUp/sigLocDn/sigGlobUp/sigGlobDn —
+//      мог сработать на сигнал, у которого на графике нет видимой метки
+//      (подавлен как дубль ГЛОБа, или слабый при выключенном showWeak).
+//      Добавлены отдельные *Shown-флаги, включаются только когда метка
+//      реально нарисована; алерты подписаны на них.
+//   3. Стоп/тейк-линии и линия уровня (showBrokenRef) для ЛОК-сигнала,
+//      которого позже поглотил ГЛОБ (та же логика, что убирает ЛОК-метку —
+//      см. фикс #4 ниже), не удалялись и зависали на графике сами по себе.
+//      Теперь удаляются вместе с меткой.
+//   4. Буфер стоп/тейк линий (keptStopTake) делил один maxKeep с буфером
+//      подписей (keptStopTakeLbl), но на каждый сигнал пишет 2 линии и
+//      1 подпись — после maxKeep/2 сигналов старые линии стоп/тейка
+//      вытеснялись быстрее, чем подписи "TP", и подписи зависали без линий.
+//      Линии теперь хранятся с лимитом maxKeep*2 (то же число сигналов).
+//   5. Мёртвый код lhDiv/llDiv/ghDiv/glDiv (писались, нигде не читались) —
+//      удалён.
+//   6. Заголовок группы G1 "1. Структура (1H)" не обновили при фиксе #8
+//      (индикатор давно не привязан к 1H) — убран хвост "(1H)".
 //
 // УБРАНО:
 //   - Ловушка старшего ТФ (была грубой прокси через один пивот, не структура —
@@ -92,7 +120,7 @@
 indicator("Слом тренда (по методичке) v11", "СЛОМ v11", overlay = true, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
 
 // ─────────────────────────────────────────────────────────────────────────────
-G1 = "1. Структура (1H)"
+G1 = "1. Структура"
 locLB  = input.int(5,  "Локальный хай/лой: lookback", minval = 2, group = G1)
 globLB = input.int(20, "Глобальный хай/лой: lookback", minval = 3, group = G1)
 
@@ -265,9 +293,23 @@ removeSig(label lb) =>
     if idx >= 0
         array.remove(keptSig, idx)
 
+// фикс #10.3: снять объект из произвольного буфера линий/меток перед delete,
+// чтобы позже FIFO-вытеснение того же буфера не попыталось удалить его повторно
+removeLine(array<line> arr, line l) =>
+    idx = array.indexof(arr, l)
+    if idx >= 0
+        array.remove(arr, idx)
+
+removeLbl(array<label> arr, label lb) =>
+    idx = array.indexof(arr, lb)
+    if idx >= 0
+        array.remove(arr, idx)
+
 pushStopTake(line l) =>
+    // фикс #10.4: 2 линии на сигнал против 1 подписи в keptStopTakeLbl —
+    // держим тот же лимит "по числу сигналов", а не по числу объектов
     array.push(keptStopTake, l)
-    while array.size(keptStopTake) > maxKeep
+    while array.size(keptStopTake) > maxKeep * 2
         line.delete(array.shift(keptStopTake))
 
 pushStopTakeLbl(label lb) =>
@@ -286,12 +328,6 @@ var float prevLocPH_div = na
 var float prevLocPL_div = na
 var float prevGlobPH_div = na
 var float prevGlobPL_div = na
-
-// была ли дивергенция на пивоте, сформировавшем ТЕКУЩУЮ (ещё не сломанную) зону
-var bool lhDiv = false
-var bool llDiv = false
-var bool ghDiv = false
-var bool glDiv = false
 
 // ЗОНЫ ------------------------------------------------------------------------
 var float lhTop = na
@@ -361,6 +397,17 @@ var int   locLblUpBar = na
 var label locLblDn = na
 var int   locLblDnBar = na
 
+// фикс #10.3: артефакты (линия уровня + стоп/тейк) конкретного ЛОК-сигнала —
+// нужны, чтобы удалить их вместе с меткой, если её позже поглотит ГЛОБ
+var line  locLineUp  = na
+var line  locStopUp  = na
+var line  locTakeUp  = na
+var label locTPLblUp = na
+var line  locLineDn  = na
+var line  locStopDn  = na
+var line  locTakeDn  = na
+var label locTPLblDn = na
+
 var int nStarted    = 0
 var int nFailBack   = 0
 var int nFailWindow = 0
@@ -406,6 +453,13 @@ bool sigGlobUp = false
 bool sigGlobDn = false
 bool failedTry = false
 
+// фикс #10.2: отдельные "показанные" флаги для алертов — true только когда
+// метка сигнала реально прошла дедуп/скор-фильтр и нарисована на графике
+bool sigLocUpShown  = false
+bool sigLocDnShown  = false
+bool sigGlobUpShown = false
+bool sigGlobDnShown = false
+
 float sLvlLocUp = na
 float sLvlLocDn = na
 float sLvlGlobUp = na
@@ -434,7 +488,6 @@ if barstate.isconfirmed
             pushExt(label.new(pb, phLoc, lblTxt, style = label.style_label_down, color = extText ? color.new(c, 70) : color.new(c, 30), textcolor = color.new(c, 0), size = size.tiny, tooltip = tt))
         prevLocPH := phLoc
         prevLocPH_div := divNow
-        lhDiv := divBear
 
         // фикс #2: если по старой зоне ещё идёт попытка закрепа — архивируем
         // её (остаётся на графике), а не стираем молча
@@ -459,7 +512,6 @@ if barstate.isconfirmed
             pushExt(label.new(pb, plLoc, lblTxt, style = label.style_label_up, color = extText ? color.new(c, 70) : color.new(c, 30), textcolor = color.new(c, 0), size = size.tiny, tooltip = tt))
         prevLocPL := plLoc
         prevLocPL_div := divNow
-        llDiv := divBull
 
         if not na(llBox)
             if aLLon or rtLLon
@@ -482,7 +534,6 @@ if barstate.isconfirmed
             pushExt(label.new(pb, phGlob, lblTxt, style = label.style_label_down, color = color.new(c, 20), textcolor = color.white, size = size.small, tooltip = tt))
         prevGlobPH := phGlob
         prevGlobPH_div := divNow
-        ghDiv := divBear
 
         if not na(ghBox)
             if aGHon or rtGHon
@@ -506,7 +557,6 @@ if barstate.isconfirmed
             pushExt(label.new(pb, plGlob, lblTxt, style = label.style_label_up, color = color.new(c, 20), textcolor = color.white, size = size.small, tooltip = tt))
         prevGlobPL := plGlob
         prevGlobPL_div := divNow
-        glDiv := divBull
 
         if not na(glBox)
             if aGLon or rtGLon
@@ -797,8 +847,11 @@ if barstate.isconfirmed
     // ===== РЕТЕСТ (фильтр C, только если useRetest) =========================
     // Ждём возврата цены к пробитому уровню (touched), затем отбоя (close
     // снова за уровнем). Не дождались за retestWindow баров — сигнал сгорает.
+    // фикс #10.1: bar_index > rtXXbar — бар, на котором закреп только что
+    // подтвердился, не считается "касанием"; иначе low этого же бара почти
+    // всегда попадает в допуск retestATR, и ретест проходит мгновенно.
     if rtLHon
-        if not rtLHtouched and low <= rtLHlvl + retestATR * atr14
+        if not rtLHtouched and bar_index > rtLHbar and low <= rtLHlvl + retestATR * atr14
             rtLHtouched := true
         if rtLHtouched and close > rtLHlvl
             sigLocUp := true
@@ -811,7 +864,7 @@ if barstate.isconfirmed
             nRetestFail += 1
 
     if rtLLon
-        if not rtLLtouched and high >= rtLLlvl - retestATR * atr14
+        if not rtLLtouched and bar_index > rtLLbar and high >= rtLLlvl - retestATR * atr14
             rtLLtouched := true
         if rtLLtouched and close < rtLLlvl
             sigLocDn := true
@@ -824,7 +877,7 @@ if barstate.isconfirmed
             nRetestFail += 1
 
     if rtGHon
-        if not rtGHtouched and low <= rtGHlvl + retestATR * atr14
+        if not rtGHtouched and bar_index > rtGHbar and low <= rtGHlvl + retestATR * atr14
             rtGHtouched := true
         if rtGHtouched and close > rtGHlvl
             sigGlobUp := true
@@ -837,7 +890,7 @@ if barstate.isconfirmed
             nRetestFail += 1
 
     if rtGLon
-        if not rtGLtouched and high >= rtGLlvl - retestATR * atr14
+        if not rtGLtouched and bar_index > rtGLbar and high >= rtGLlvl - retestATR * atr14
             rtGLtouched := true
         if rtGLtouched and close < rtGLlvl
             sigGlobDn := true
@@ -878,8 +931,10 @@ if barstate.isconfirmed
             pushSig(lb)   // фикс #4
             locLblUp := lb
             locLblUpBar := bar_index
+            sigLocUpShown := true   // фикс #10.2
             if showBrokenRef
-                pushLocLine(line.new(stb, lvl, bar_index, lvl, color = color.new(bullCol, 30), style = line.style_dotted, width = 1))
+                locLineUp := line.new(stb, lvl, bar_index, lvl, color = color.new(bullCol, 30), style = line.style_dotted, width = 1)
+                pushLocLine(locLineUp)
         // фикс #9: стоп/тейк рисуем только для реально засчитанных сигналов
         // (не дубль глобала, проходит скор-фильтр) — иначе уровни не совпадают
         // с тем, что показывает label, и с тем, что взяла бы strategy-компаньон
@@ -888,9 +943,12 @@ if barstate.isconfirmed
             stopDist = close - stopLvl
             if stopDist > 0
                 takeLvl = close + stopDist * rrRatioViz
-                pushStopTake(line.new(bar_index, stopLvl, bar_index + 30, stopLvl, color = color.new(bearCol, 0), style = line.style_dashed, width = 1))
-                pushStopTake(line.new(bar_index, takeLvl, bar_index + 30, takeLvl, color = color.new(bullCol, 0), style = line.style_dashed, width = 1))
-                pushStopTakeLbl(label.new(bar_index + 30, takeLvl, "TP " + str.tostring(rrRatioViz, "#.#") + "R", style = label.style_label_left, color = color.new(bullCol, 20), textcolor = color.white, size = size.tiny))
+                locStopUp := line.new(bar_index, stopLvl, bar_index + 30, stopLvl, color = color.new(bearCol, 0), style = line.style_dashed, width = 1)
+                locTakeUp := line.new(bar_index, takeLvl, bar_index + 30, takeLvl, color = color.new(bullCol, 0), style = line.style_dashed, width = 1)
+                locTPLblUp := label.new(bar_index + 30, takeLvl, "TP " + str.tostring(rrRatioViz, "#.#") + "R", style = label.style_label_left, color = color.new(bullCol, 20), textcolor = color.white, size = size.tiny)
+                pushStopTake(locStopUp)
+                pushStopTake(locTakeUp)
+                pushStopTakeLbl(locTPLblUp)
 
     if sigLocDn
         nLocSlom += 1
@@ -914,17 +972,22 @@ if barstate.isconfirmed
             pushSig(lb)
             locLblDn := lb
             locLblDnBar := bar_index
+            sigLocDnShown := true   // фикс #10.2
             if showBrokenRef
-                pushLocLine(line.new(stb, lvl, bar_index, lvl, color = color.new(bearCol, 30), style = line.style_dotted, width = 1))
+                locLineDn := line.new(stb, lvl, bar_index, lvl, color = color.new(bearCol, 30), style = line.style_dotted, width = 1)
+                pushLocLine(locLineDn)
         // фикс #9: см. блок ЛОК↑ — стоп/тейк только для реально засчитанного сигнала
         if showStopTake and not nearGlob and (full or showWeak)
             stopLvl = sFarLocDn + slBufferViz * atr14
             stopDist = stopLvl - close
             if stopDist > 0
                 takeLvl = close - stopDist * rrRatioViz
-                pushStopTake(line.new(bar_index, stopLvl, bar_index + 30, stopLvl, color = color.new(bearCol, 0), style = line.style_dashed, width = 1))
-                pushStopTake(line.new(bar_index, takeLvl, bar_index + 30, takeLvl, color = color.new(bullCol, 0), style = line.style_dashed, width = 1))
-                pushStopTakeLbl(label.new(bar_index + 30, takeLvl, "TP " + str.tostring(rrRatioViz, "#.#") + "R", style = label.style_label_left, color = color.new(bearCol, 20), textcolor = color.white, size = size.tiny))
+                locStopDn := line.new(bar_index, stopLvl, bar_index + 30, stopLvl, color = color.new(bearCol, 0), style = line.style_dashed, width = 1)
+                locTakeDn := line.new(bar_index, takeLvl, bar_index + 30, takeLvl, color = color.new(bullCol, 0), style = line.style_dashed, width = 1)
+                locTPLblDn := label.new(bar_index + 30, takeLvl, "TP " + str.tostring(rrRatioViz, "#.#") + "R", style = label.style_label_left, color = color.new(bearCol, 20), textcolor = color.white, size = size.tiny)
+                pushStopTake(locStopDn)
+                pushStopTake(locTakeDn)
+                pushStopTakeLbl(locTPLblDn)
 
     if sigGlobUp
         nGlobSlom += 1
@@ -939,6 +1002,24 @@ if barstate.isconfirmed
             removeSig(locLblUp)   // фикс #4: убираем из буфера прежде, чем удалить объект
             label.delete(locLblUp)
             locLblUp := na
+            // фикс #10.3: подчищаем и линию уровня, и стоп/тейк этого ЛОК-сигнала —
+            // иначе они остаются висеть на графике сами по себе
+            if not na(locLineUp)
+                removeLine(keptLocLines, locLineUp)
+                line.delete(locLineUp)
+                locLineUp := na
+            if not na(locStopUp)
+                removeLine(keptStopTake, locStopUp)
+                line.delete(locStopUp)
+                locStopUp := na
+            if not na(locTakeUp)
+                removeLine(keptStopTake, locTakeUp)
+                line.delete(locTakeUp)
+                locTakeUp := na
+            if not na(locTPLblUp)
+                removeLbl(keptStopTakeLbl, locTPLblUp)
+                label.delete(locTPLblUp)
+                locTPLblUp := na
         emaBad   = useEmaFilter and emaTrend == -1
         totalChk = 1 + (useEmaFilter ? 1 : 0)
         passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0)
@@ -948,6 +1029,7 @@ if barstate.isconfirmed
             txt = "ГЛОБ↑" + scoreTxt
             glb = label.new(bar_index, low, txt, style = label.style_label_up, color = color.new(bullCol, full ? 0 : 55), textcolor = color.white, size = size.small, tooltip = "ГЛОБАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
             pushSig(glb)
+            sigGlobUpShown := true   // фикс #10.2
             if showBrokenRef
                 pushGlobLine(line.new(stb, lvl, bar_index, lvl, color = color.new(bullCol, 10), style = line.style_dashed, width = 1))
         // фикс #9: стоп/тейк только для реально засчитанного сигнала (скор-фильтр)
@@ -973,6 +1055,22 @@ if barstate.isconfirmed
             removeSig(locLblDn)
             label.delete(locLblDn)
             locLblDn := na
+            if not na(locLineDn)
+                removeLine(keptLocLines, locLineDn)
+                line.delete(locLineDn)
+                locLineDn := na
+            if not na(locStopDn)
+                removeLine(keptStopTake, locStopDn)
+                line.delete(locStopDn)
+                locStopDn := na
+            if not na(locTakeDn)
+                removeLine(keptStopTake, locTakeDn)
+                line.delete(locTakeDn)
+                locTakeDn := na
+            if not na(locTPLblDn)
+                removeLbl(keptStopTakeLbl, locTPLblDn)
+                label.delete(locTPLblDn)
+                locTPLblDn := na
         emaBad   = useEmaFilter and emaTrend == 1
         totalChk = 1 + (useEmaFilter ? 1 : 0)
         passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0)
@@ -982,6 +1080,7 @@ if barstate.isconfirmed
             txt = "ГЛОБ↓" + scoreTxt
             glb = label.new(bar_index, high, txt, style = label.style_label_down, color = color.new(bearCol, full ? 0 : 55), textcolor = color.white, size = size.small, tooltip = "ГЛОБАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
             pushSig(glb)
+            sigGlobDnShown := true   // фикс #10.2
             if showBrokenRef
                 pushGlobLine(line.new(stb, lvl, bar_index, lvl, color = color.new(bearCol, 10), style = line.style_dashed, width = 1))
         // фикс #9: см. блок ГЛОБ↑ — стоп/тейк только для реально засчитанного сигнала
@@ -1049,7 +1148,10 @@ if (showTrend or showFunnel) and barstate.islast
         table.cell(tp, 1, 11, str.tostring(nLocSlom) + " / " + str.tostring(nGlobSlom) + (na(conv) ? "" : "  " + str.tostring(conv, "#") + "%"), text_size = size.tiny, text_color = txtC, bgcolor = hdrBg)
 
 // ─────────────────────────────────────────────────────────────────────────────
-alertcondition(sigGlobUp, "Глобальный слом ВВЕРХ", "Слом: глобальный ВВЕРХ")
-alertcondition(sigGlobDn, "Глобальный слом ВНИЗ",  "Слом: глобальный ВНИЗ")
-alertcondition(sigLocUp,  "Локальный слом ВВЕРХ",  "Слом: локальный ВВЕРХ")
-alertcondition(sigLocDn,  "Локальный слом ВНИЗ",   "Слом: локальный ВНИЗ")
+// фикс #10.2: алерты слушают *Shown — срабатывают только когда на графике
+// реально появилась метка (сигнал не подавлен как дубль ГЛОБа и не скрыт
+// как слабый при выключенном showWeak)
+alertcondition(sigGlobUpShown, "Глобальный слом ВВЕРХ", "Слом: глобальный ВВЕРХ")
+alertcondition(sigGlobDnShown, "Глобальный слом ВНИЗ",  "Слом: глобальный ВНИЗ")
+alertcondition(sigLocUpShown,  "Локальный слом ВВЕРХ",  "Слом: локальный ВВЕРХ")
+alertcondition(sigLocDnShown,  "Локальный слом ВНИЗ",   "Слом: локальный ВНИЗ")
