@@ -41,6 +41,22 @@
 //      удалён.
 //   6. Заголовок группы G1 "1. Структура (1H)" не обновили при фиксе #8
 //      (индикатор давно не привязан к 1H) — убран хвост "(1H)".
+//   7. volOK/squeezeOK при na(volume)/na(atrSMA) (нет объёма на инструменте,
+//      либо не хватает истории для прогрева atrSmaLen) молча трактовали
+//      сравнение с na как false — включённый фильтр объёма/сквиза мог
+//      навсегда заблокировать вообще все сигналы без единого пояснения.
+//      Теперь na(...) явно пропускает фильтр в этих случаях.
+//   8. Длина проекции линий стоп/тейка вправо была зашита константой (30
+//      баров) — вынесена в input stVizLen (группа "9.").
+//   9. Панель тренда (строка "Структура") считала strTrend по locLastDir/
+//      globLastDir, которые обновляются на КАЖДОМ сыром сигнале — включая
+//      подавленные как дубль ГЛОБа или скрытые как слабые (без метки на
+//      графике). Добавлены отдельные locLastDirShown/globLastDirShown,
+//      обновляемые только когда метка реально нарисована; панель тренда
+//      переведена на них. Внутренняя логика "воздуха" (air) по-прежнему
+//      использует немодифицированные locLastDir/globLastDir — иначе
+//      подавленный сигнал перестал бы засчитываться против будущих "в
+//      воздухе" сигналов того же направления.
 //
 // УБРАНО:
 //   - Ловушка старшего ТФ (была грубой прокси через один пивот, не структура —
@@ -194,6 +210,7 @@ G9 = "9. Стоп/тейк на сломе"
 showStopTake = input.bool(false, "Показывать стоп/тейк на сломе", group = G9)
 rrRatioViz   = input.float(3.0, "R:R", minval = 0.5, step = 0.5, group = G9)
 slBufferViz  = input.float(0.3, "Стоп: доп. буфер за зоной, × ATR14", minval = 0, step = 0.1, group = G9)
+stVizLen     = input.int(30, "Длина линий стоп/тейка вправо, баров", minval = 5, maxval = 200, group = G9)
 
 strictRef  = refMode == "Конец тени (строго)"
 needWickOK = refMode == "Тело + подтверждение тенью"
@@ -227,7 +244,10 @@ fullBody = rng > 0 and bodySz / rng >= bodyRatio
 impBody  = bodySz >= impulseATR * atr14
 
 // фильтр A (объём): свеча закрепа должна иметь объём выше SMA×множитель
-volOK    = not useVolFilter or volume >= ta.sma(volume, volLen) * volMult
+// фикс #10.7: на инструментах без объёма (часть FX/CFD) volume == na —
+// сравнение с na молча даёт false на каждом баре, и фильтр без предупреждения
+// блокирует вообще все сигналы. na(volume) явно пропускает фильтр в этом случае.
+volOK    = not useVolFilter or na(volume) or volume >= ta.sma(volume, volLen) * volMult
 
 holdUpC  = fullBody and (not requireDir or close > open) and volOK
 holdDnC  = fullBody and (not requireDir or close < open) and volOK
@@ -239,8 +259,11 @@ impDnC   = useImpulse and impBody and close < open and volOK
 sessOK = not useSession or not na(time(timeframe.period, sessTime, "UTC"))
 
 // фильтр «сквиз»: не начинать пробой, если текущий ATR аномально ниже своей средней
+// фикс #10.7: atrSMA не готова первые ~atrSmaLen+14 баров истории — na(atrSMA)
+// без явной обработки давала false и блокировала старт любых попыток на
+// прогреве; трактуем "ещё нет данных" как "не в сквизе"
 atrSMA    = ta.sma(atr14, atrSmaLen)
-squeezeOK = not useSqueezeFilter or atr14 >= atrSMA * squeezeMult
+squeezeOK = not useSqueezeFilter or na(atrSMA) or atr14 >= atrSMA * squeezeMult
 
 // стартовый гейт для НОВОЙ попытки пробоя (используется вместе с aXXon в условиях ниже)
 startOK = sessOK and squeezeOK
@@ -391,6 +414,14 @@ var int   locLastDir = 0
 var float locLastLvl = na
 var int   globLastDir = 0
 var float globLastLvl = na
+
+// фикс #10.9: отдельные "показанные" версии для Панели тренда — locLastDir/
+// globLastDir выше обновляются на КАЖДОМ сыром сигнале (это нужно для
+// корректной работы "воздуха", см. air ниже) и не должны трогать эту логику;
+// а вот в Панели тренда показывать структуру по сигналу без метки на графике
+// (подавленному как дубль ГЛОБа или скрытому как слабый) не стоит
+var int   locLastDirShown = 0
+var int   globLastDirShown = 0
 
 var label locLblUp = na
 var int   locLblUpBar = na
@@ -932,6 +963,7 @@ if barstate.isconfirmed
             locLblUp := lb
             locLblUpBar := bar_index
             sigLocUpShown := true   // фикс #10.2
+            locLastDirShown := 1    // фикс #10.9
             if showBrokenRef
                 locLineUp := line.new(stb, lvl, bar_index, lvl, color = color.new(bullCol, 30), style = line.style_dotted, width = 1)
                 pushLocLine(locLineUp)
@@ -943,9 +975,9 @@ if barstate.isconfirmed
             stopDist = close - stopLvl
             if stopDist > 0
                 takeLvl = close + stopDist * rrRatioViz
-                locStopUp := line.new(bar_index, stopLvl, bar_index + 30, stopLvl, color = color.new(bearCol, 0), style = line.style_dashed, width = 1)
-                locTakeUp := line.new(bar_index, takeLvl, bar_index + 30, takeLvl, color = color.new(bullCol, 0), style = line.style_dashed, width = 1)
-                locTPLblUp := label.new(bar_index + 30, takeLvl, "TP " + str.tostring(rrRatioViz, "#.#") + "R", style = label.style_label_left, color = color.new(bullCol, 20), textcolor = color.white, size = size.tiny)
+                locStopUp := line.new(bar_index, stopLvl, bar_index + stVizLen, stopLvl, color = color.new(bearCol, 0), style = line.style_dashed, width = 1)
+                locTakeUp := line.new(bar_index, takeLvl, bar_index + stVizLen, takeLvl, color = color.new(bullCol, 0), style = line.style_dashed, width = 1)
+                locTPLblUp := label.new(bar_index + stVizLen, takeLvl, "TP " + str.tostring(rrRatioViz, "#.#") + "R", style = label.style_label_left, color = color.new(bullCol, 20), textcolor = color.white, size = size.tiny)
                 pushStopTake(locStopUp)
                 pushStopTake(locTakeUp)
                 pushStopTakeLbl(locTPLblUp)
@@ -973,6 +1005,7 @@ if barstate.isconfirmed
             locLblDn := lb
             locLblDnBar := bar_index
             sigLocDnShown := true   // фикс #10.2
+            locLastDirShown := -1   // фикс #10.9
             if showBrokenRef
                 locLineDn := line.new(stb, lvl, bar_index, lvl, color = color.new(bearCol, 30), style = line.style_dotted, width = 1)
                 pushLocLine(locLineDn)
@@ -982,9 +1015,9 @@ if barstate.isconfirmed
             stopDist = stopLvl - close
             if stopDist > 0
                 takeLvl = close - stopDist * rrRatioViz
-                locStopDn := line.new(bar_index, stopLvl, bar_index + 30, stopLvl, color = color.new(bearCol, 0), style = line.style_dashed, width = 1)
-                locTakeDn := line.new(bar_index, takeLvl, bar_index + 30, takeLvl, color = color.new(bullCol, 0), style = line.style_dashed, width = 1)
-                locTPLblDn := label.new(bar_index + 30, takeLvl, "TP " + str.tostring(rrRatioViz, "#.#") + "R", style = label.style_label_left, color = color.new(bearCol, 20), textcolor = color.white, size = size.tiny)
+                locStopDn := line.new(bar_index, stopLvl, bar_index + stVizLen, stopLvl, color = color.new(bearCol, 0), style = line.style_dashed, width = 1)
+                locTakeDn := line.new(bar_index, takeLvl, bar_index + stVizLen, takeLvl, color = color.new(bullCol, 0), style = line.style_dashed, width = 1)
+                locTPLblDn := label.new(bar_index + stVizLen, takeLvl, "TP " + str.tostring(rrRatioViz, "#.#") + "R", style = label.style_label_left, color = color.new(bearCol, 20), textcolor = color.white, size = size.tiny)
                 pushStopTake(locStopDn)
                 pushStopTake(locTakeDn)
                 pushStopTakeLbl(locTPLblDn)
@@ -1030,6 +1063,7 @@ if barstate.isconfirmed
             glb = label.new(bar_index, low, txt, style = label.style_label_up, color = color.new(bullCol, full ? 0 : 55), textcolor = color.white, size = size.small, tooltip = "ГЛОБАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
             pushSig(glb)
             sigGlobUpShown := true   // фикс #10.2
+            globLastDirShown := 1    // фикс #10.9
             if showBrokenRef
                 pushGlobLine(line.new(stb, lvl, bar_index, lvl, color = color.new(bullCol, 10), style = line.style_dashed, width = 1))
         // фикс #9: стоп/тейк только для реально засчитанного сигнала (скор-фильтр)
@@ -1038,9 +1072,9 @@ if barstate.isconfirmed
             stopDist = close - stopLvl
             if stopDist > 0
                 takeLvl = close + stopDist * rrRatioViz
-                pushStopTake(line.new(bar_index, stopLvl, bar_index + 30, stopLvl, color = color.new(bearCol, 0), style = line.style_dashed, width = 2))
-                pushStopTake(line.new(bar_index, takeLvl, bar_index + 30, takeLvl, color = color.new(bullCol, 0), style = line.style_dashed, width = 2))
-                pushStopTakeLbl(label.new(bar_index + 30, takeLvl, "TP " + str.tostring(rrRatioViz, "#.#") + "R", style = label.style_label_left, color = color.new(bullCol, 20), textcolor = color.white, size = size.small))
+                pushStopTake(line.new(bar_index, stopLvl, bar_index + stVizLen, stopLvl, color = color.new(bearCol, 0), style = line.style_dashed, width = 2))
+                pushStopTake(line.new(bar_index, takeLvl, bar_index + stVizLen, takeLvl, color = color.new(bullCol, 0), style = line.style_dashed, width = 2))
+                pushStopTakeLbl(label.new(bar_index + stVizLen, takeLvl, "TP " + str.tostring(rrRatioViz, "#.#") + "R", style = label.style_label_left, color = color.new(bullCol, 20), textcolor = color.white, size = size.small))
 
     if sigGlobDn
         nGlobSlom += 1
@@ -1081,6 +1115,7 @@ if barstate.isconfirmed
             glb = label.new(bar_index, high, txt, style = label.style_label_down, color = color.new(bearCol, full ? 0 : 55), textcolor = color.white, size = size.small, tooltip = "ГЛОБАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
             pushSig(glb)
             sigGlobDnShown := true   // фикс #10.2
+            globLastDirShown := -1   // фикс #10.9
             if showBrokenRef
                 pushGlobLine(line.new(stb, lvl, bar_index, lvl, color = color.new(bearCol, 10), style = line.style_dashed, width = 1))
         // фикс #9: см. блок ГЛОБ↑ — стоп/тейк только для реально засчитанного сигнала
@@ -1089,9 +1124,9 @@ if barstate.isconfirmed
             stopDist = stopLvl - close
             if stopDist > 0
                 takeLvl = close - stopDist * rrRatioViz
-                pushStopTake(line.new(bar_index, stopLvl, bar_index + 30, stopLvl, color = color.new(bearCol, 0), style = line.style_dashed, width = 2))
-                pushStopTake(line.new(bar_index, takeLvl, bar_index + 30, takeLvl, color = color.new(bullCol, 0), style = line.style_dashed, width = 2))
-                pushStopTakeLbl(label.new(bar_index + 30, takeLvl, "TP " + str.tostring(rrRatioViz, "#.#") + "R", style = label.style_label_left, color = color.new(bearCol, 20), textcolor = color.white, size = size.small))
+                pushStopTake(line.new(bar_index, stopLvl, bar_index + stVizLen, stopLvl, color = color.new(bearCol, 0), style = line.style_dashed, width = 2))
+                pushStopTake(line.new(bar_index, takeLvl, bar_index + stVizLen, takeLvl, color = color.new(bullCol, 0), style = line.style_dashed, width = 2))
+                pushStopTakeLbl(label.new(bar_index + stVizLen, takeLvl, "TP " + str.tostring(rrRatioViz, "#.#") + "R", style = label.style_label_left, color = color.new(bearCol, 20), textcolor = color.white, size = size.small))
 
 // ─────────────────────────────────────────────────────────────────────────────
 plotshape(showFailed and failedTry, "Сгоревшая попытка закрепа", shape.xcross, location.belowbar, color.new(color.gray, 55), size = size.tiny)
@@ -1109,7 +1144,8 @@ if (showTrend or showFunnel) and barstate.islast
     if showTrend
         emaTxt = emaTrend == 1 ? "аптренд" : emaTrend == -1 ? "даунтренд" : "нет тренда"
         emaClr = emaTrend == 1 ? bullCol : emaTrend == -1 ? bearCol : neutCol
-        strTrend = globLastDir != 0 ? globLastDir : locLastDir
+        // фикс #10.9: панель тренда смотрит только на реально показанные сигналы
+        strTrend = globLastDirShown != 0 ? globLastDirShown : locLastDirShown
         strTxt = strTrend == 1 ? "аптренд" : strTrend == -1 ? "даунтренд" : "нет данных"
         strClr = strTrend == 1 ? bullCol : strTrend == -1 ? bearCol : neutCol
         agree    = emaTrend != 0 and strTrend != 0 and emaTrend == strTrend
