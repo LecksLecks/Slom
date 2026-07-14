@@ -18,8 +18,6 @@
 //   - Order Block — только для ГЛОБАЛЬНЫХ сломов (осознанно сужено ради
 //     надёжности): последняя противоположная свеча перед стартом попытки,
 //     статичная зона (без live-отслеживания митигации) с проекцией obProjLen.
-//   - FVG / имбаланс — классический 3-свечной гэп, статичные зоны, независимо
-//     от структуры/закрепа.
 //   - HTF-контекст (группа "11.") — направление структуры на старшем ТФ через
 //     request.security (HH/HL vs LH/LL на пивотах, НЕ прокси через 1 пивот,
 //     как было в старой убранной "ловушке ТФ"), опциональный мягкий фильтр
@@ -28,6 +26,8 @@
 //     "попытка заблокирована фильтром сессии/сквиза".
 //   - Компаньон-стратегия (slom_trenda_v11_strategy.pine) — облегчённое ядро
 //     без визуального шума, с реальными strategy.entry/exit для бэктеста.
+// (FVG/имбаланс был добавлен и затем убран по запросу — статичные зоны без
+// live-отслеживания заполнения признаны лишними для этой ревизии.)
 // УБРАНО:
 //   - Группа "8. MACD-дивергенция" целиком (сама себя называла чисто
 //     информационной, сигнал не двигала — лишний код без веса в решении).
@@ -251,8 +251,7 @@ useEQ     = input.bool(true, "Равные хаи/лои (EQH/EQL)", group = G10
 eqATR     = input.float(0.15, "Допуск \"равности\", × ATR14", minval = 0.01, step = 0.01, group = G10)
 useSweep  = input.bool(true, "Отмечать снятие ликвидности (sweep)", group = G10)
 useOB     = input.bool(true, "Order Block на сломе", group = G10)
-obProjLen = input.int(40, "OB/FVG: длина проекции зоны, баров", minval = 5, maxval = 300, group = G10)
-useFVG    = input.bool(true, "Fair Value Gap (имбаланс)", group = G10)
+obProjLen = input.int(40, "OB: длина проекции зоны, баров", minval = 5, maxval = 300, group = G10)
 
 G11 = "11. HTF-контекст"
 useHtfFilter = input.bool(false, "Слом против HTF-структуры — снижает скор", group = G11)
@@ -339,7 +338,6 @@ var array<label> keptExt       = array.new<label>()
 var array<label> keptSig       = array.new<label>()
 var array<line>  keptStopTake    = array.new<line>()
 var array<label> keptStopTakeLbl = array.new<label>()
-var array<box>   keptFVGBoxes    = array.new<box>()   // ADD-5
 var array<box>   keptOBBoxes     = array.new<box>()   // ADD-4
 
 pushLocBox(box b) =>
@@ -400,11 +398,6 @@ pushStopTakeLbl(label lb) =>
     array.push(keptStopTakeLbl, lb)
     while array.size(keptStopTakeLbl) > maxKeep
         label.delete(array.shift(keptStopTakeLbl))
-
-pushFVGBox(box b) =>
-    array.push(keptFVGBoxes, b)
-    while array.size(keptFVGBoxes) > maxKeep
-        box.delete(array.shift(keptFVGBoxes))
 
 pushOBBox(box b) =>
     array.push(keptOBBoxes, b)
@@ -747,19 +740,6 @@ if barstate.isconfirmed
             glSwept := true
             nSweep += 1
             pushExt(label.new(bar_index, low, "SWEEP", style = label.style_label_up, color = color.new(bullCol, 20), textcolor = color.white, size = size.small, tooltip = "Снятие ГЛОБАЛЬНОЙ ликвидности ниже " + str.tostring(glBot, format.mintick) + " без закрепа"))
-
-    // ===== FVG / ИМБАЛАНС (ADD-5) ===========================================
-    // Стандартный 3-свечной гэп: тень текущей свечи не перекрывает тень
-    // свечи 2 бара назад — средняя свеча не заполнила разрыв. Проверяется
-    // на каждом подтверждённом баре независимо от структуры/закрепа.
-    // Зона статична (без live-отслеживания заполнения) — фикс. проекция obProjLen.
-    if useFVG
-        bullFVG = low > high[2]
-        bearFVG = high < low[2]
-        if bullFVG
-            pushFVGBox(box.new(bar_index - 2, low, bar_index + obProjLen, high[2], border_color = color.new(bullCol, 60), bgcolor = color.new(bullCol, 88), border_width = 1, border_style = line.style_dashed))
-        if bearFVG
-            pushFVGBox(box.new(bar_index - 2, low[2], bar_index + obProjLen, high, border_color = color.new(bearCol, 60), bgcolor = color.new(bearCol, 88), border_width = 1, border_style = line.style_dashed))
 
     // ===== СБРОС «УЖЕ СЛОМАН» ===============================================
     // фикс #5: сбрасываем *Far вместе с *Broken
