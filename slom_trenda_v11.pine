@@ -42,6 +42,9 @@
 //     >60% алгоритмических ордеров бенчмаркаются по VWAP (Greenwich
 //     Associates), слом на "правильной" стороне VWAP статистически ближе
 //     к реальному институциональному потоку.
+//   - useAvwapFilter: та же идея, но с ручной точкой привязки (сессия /
+//     неделя / любой новый глобальный экстремум — переиспользует phGlob/
+//     plGlob, свой пивот не заводит) вместо ежедневного сброса.
 //   - Визуализация стоп/тейка на сломе (группа "9."): стоп за дальней
 //     границей сломанной зоны + буфер ATR, тейк по R:R — те же уровни,
 //     что использует strategy-компаньон для бэктеста
@@ -160,6 +163,9 @@ useHtfEmaFilter = input.bool(false, "Слом против EMA старшего 
 htfTF           = input.timeframe("240", "Старший TF (EMA 50/200), выберите выше текущего графика", group = G6)
 
 useVwapFilter = input.bool(false, "Слом против сессионного VWAP — снижает скор", group = G6)
+
+useAvwapFilter  = input.bool(false, "Слом против Anchored VWAP — снижает скор", group = G6)
+avwapAnchorMode = input.string("Сессия", "Anchored VWAP: точка привязки", options = ["Сессия", "Неделя", "Глобальный экстремум"], group = G6)
 
 useRetest     = input.bool(false, "Требовать ретест с отбоем перед сигналом", group = G6)
 retestATR     = input.float(1.0, "Ретест: допуск от уровня, × ATR14", minval = 0.1, step = 0.1, group = G6)
@@ -359,6 +365,10 @@ var bool  ghSwept = false
 var bool  llSwept = false
 var bool  glSwept = false
 
+// Anchored VWAP: накопители сбрасываются на новой точке привязки
+var float avwapPV = 0.0
+var float avwapV  = 0.0
+
 // ПОПЫТКИ ---------------------------------------------------------------------
 var bool  aLHon = false
 var float aLHref = na
@@ -475,6 +485,21 @@ float sFarGlobUp = na
 float sFarGlobDn = na
 
 if barstate.isconfirmed
+
+    // ===== ANCHORED VWAP ====================================================
+    // точка привязки: новая сессия / новая неделя / любой новый глобальный
+    // экстремум (переиспользуем уже посчитанные phGlob/plGlob — свой пивот
+    // заводить не нужно)
+    anchorSession = ta.change(time("D")) != 0
+    anchorWeek    = ta.change(time("W")) != 0
+    anchorSwing   = not na(phGlob) or not na(plGlob)
+    anchorNow = avwapAnchorMode == "Сессия" ? anchorSession : avwapAnchorMode == "Неделя" ? anchorWeek : anchorSwing
+    if anchorNow
+        avwapPV := 0.0
+        avwapV  := 0.0
+    avwapPV += hlc3 * volume
+    avwapV  += volume
+    avwapVal = avwapV > 0 ? avwapPV / avwapV : na
 
     // ===== ЗОНЫ + РАЗМЕТКА ЭКСТРЕМУМОВ ======================================
     if not na(phLoc)
@@ -951,8 +976,9 @@ if barstate.isconfirmed
         emaBad   = useEmaFilter and emaTrend == -1
         htfBad   = useHtfEmaFilter and htfTrend == -1
         vwapBad  = useVwapFilter and close < vwapVal
-        totalChk = 1 + (useEmaFilter ? 1 : 0) + (useHtfEmaFilter ? 1 : 0) + (useVwapFilter ? 1 : 0)
-        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter ? (htfBad ? 0 : 1) : 0) + (useVwapFilter ? (vwapBad ? 0 : 1) : 0)
+        avwapBad = useAvwapFilter and not na(avwapVal) and close < avwapVal
+        totalChk = 1 + (useEmaFilter ? 1 : 0) + (useHtfEmaFilter ? 1 : 0) + (useVwapFilter ? 1 : 0) + (useAvwapFilter ? 1 : 0)
+        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter ? (htfBad ? 0 : 1) : 0) + (useVwapFilter ? (vwapBad ? 0 : 1) : 0) + (useAvwapFilter ? (avwapBad ? 0 : 1) : 0)
         full     = passChk == totalChk
         if showLoc and not nearGlob and (full or showWeak)
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
@@ -986,8 +1012,9 @@ if barstate.isconfirmed
         emaBad   = useEmaFilter and emaTrend == 1
         htfBad   = useHtfEmaFilter and htfTrend == 1
         vwapBad  = useVwapFilter and close > vwapVal
-        totalChk = 1 + (useEmaFilter ? 1 : 0) + (useHtfEmaFilter ? 1 : 0) + (useVwapFilter ? 1 : 0)
-        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter ? (htfBad ? 0 : 1) : 0) + (useVwapFilter ? (vwapBad ? 0 : 1) : 0)
+        avwapBad = useAvwapFilter and not na(avwapVal) and close > avwapVal
+        totalChk = 1 + (useEmaFilter ? 1 : 0) + (useHtfEmaFilter ? 1 : 0) + (useVwapFilter ? 1 : 0) + (useAvwapFilter ? 1 : 0)
+        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter ? (htfBad ? 0 : 1) : 0) + (useVwapFilter ? (vwapBad ? 0 : 1) : 0) + (useAvwapFilter ? (avwapBad ? 0 : 1) : 0)
         full     = passChk == totalChk
         if showLoc and not nearGlob and (full or showWeak)
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
@@ -1023,8 +1050,9 @@ if barstate.isconfirmed
         emaBad   = useEmaFilter and emaTrend == -1
         htfBad   = useHtfEmaFilter and htfTrend == -1
         vwapBad  = useVwapFilter and close < vwapVal
-        totalChk = 1 + (useEmaFilter ? 1 : 0) + (useHtfEmaFilter ? 1 : 0) + (useVwapFilter ? 1 : 0)
-        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter ? (htfBad ? 0 : 1) : 0) + (useVwapFilter ? (vwapBad ? 0 : 1) : 0)
+        avwapBad = useAvwapFilter and not na(avwapVal) and close < avwapVal
+        totalChk = 1 + (useEmaFilter ? 1 : 0) + (useHtfEmaFilter ? 1 : 0) + (useVwapFilter ? 1 : 0) + (useAvwapFilter ? 1 : 0)
+        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter ? (htfBad ? 0 : 1) : 0) + (useVwapFilter ? (vwapBad ? 0 : 1) : 0) + (useAvwapFilter ? (avwapBad ? 0 : 1) : 0)
         full     = passChk == totalChk
         if showGlob and (full or showWeak)
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
@@ -1058,8 +1086,9 @@ if barstate.isconfirmed
         emaBad   = useEmaFilter and emaTrend == 1
         htfBad   = useHtfEmaFilter and htfTrend == 1
         vwapBad  = useVwapFilter and close > vwapVal
-        totalChk = 1 + (useEmaFilter ? 1 : 0) + (useHtfEmaFilter ? 1 : 0) + (useVwapFilter ? 1 : 0)
-        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter ? (htfBad ? 0 : 1) : 0) + (useVwapFilter ? (vwapBad ? 0 : 1) : 0)
+        avwapBad = useAvwapFilter and not na(avwapVal) and close > avwapVal
+        totalChk = 1 + (useEmaFilter ? 1 : 0) + (useHtfEmaFilter ? 1 : 0) + (useVwapFilter ? 1 : 0) + (useAvwapFilter ? 1 : 0)
+        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter ? (htfBad ? 0 : 1) : 0) + (useVwapFilter ? (vwapBad ? 0 : 1) : 0) + (useAvwapFilter ? (avwapBad ? 0 : 1) : 0)
         full     = passChk == totalChk
         if showGlob and (full or showWeak)
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
