@@ -28,6 +28,10 @@
 //     ни разу не был протестирован стоп-охотой — источник части fakeout'ов
 //     на бэктесте (PF 0.375). Флаг привязан к зоне, не к попытке: сбрасывается
 //     только новым пивотом того же типа.
+//   - showEarly: метка "Слом? n/m" на попытке, которая ещё не прошла
+//     holdBars/wick/sweep — чисто информационная, едет по текущему бару
+//     пока попытка жива и исчезает, как только та подтвердилась или
+//     сгорела. Не меняет условие подтверждённого сигнала.
 //   - Визуализация стоп/тейка на сломе (группа "9."): стоп за дальней
 //     границей сломанной зоны + буфер ATR, тейк по R:R — те же уровни,
 //     что использует strategy-компаньон для бэктеста
@@ -129,6 +133,7 @@ showLoc       = input.bool(true, "Метки локальных сломов", g
 showGlob      = input.bool(true, "Метки глобальных сломов", group = G4)
 showWeak      = input.bool(false, "Показывать слабые сигналы (со скором ниже полного)", group = G4)
 showFailed    = input.bool(false, "Сгоревшие попытки закрепа", group = G4)
+showEarly     = input.bool(false, "Ранний слом — метка на неподтверждённой попытке (не сигнал)", group = G4)
 
 bullCol = input.color(#26a69a, "Bull", inline = "c", group = G4)
 bearCol = input.color(#ef5350, "Bear", inline = "c", group = G4)
@@ -275,6 +280,18 @@ pushStopTakeLbl(label lb) =>
     while array.size(keptStopTakeLbl) > maxKeep
         label.delete(array.shift(keptStopTakeLbl))
 
+// showEarly: живая метка на попытке, которая ещё не подтвердилась.
+// Пересоздаётся на текущем баре, пока active=true; удаляется, как только
+// попытка подтвердилась или сгорела (active=false на этом баре).
+syncEarly(active, cnt, target, lbl, px, isUp, col) =>
+    label.delete(lbl)
+    label result = na
+    if active
+        txt = "Слом? " + str.tostring(cnt) + "/" + str.tostring(target)
+        st = isUp ? label.style_label_up : label.style_label_down
+        result := label.new(bar_index, px, txt, style = st, color = color.new(col, 80), textcolor = color.new(col, 0), size = size.tiny)
+    result
+
 // ЭКСТРЕМУМЫ: предыдущие значения для классификации ----------------------------
 var float prevLocPH = na
 var float prevLocPL = na
@@ -347,6 +364,11 @@ var float aGLwick = na
 var bool  aGLwickOK = false
 var int   aGLbar = na
 var int   aGLcnt = 0
+
+var label eLHlbl = na
+var label eGHlbl = na
+var label eLLlbl = na
+var label eGLlbl = na
 
 var float lhBroken = na
 var float lhBrokenFar = na
@@ -658,6 +680,8 @@ if barstate.isconfirmed
                 nFailBack += 1
             aLHon := false
             aLHcnt := 0
+    if showEarly
+        eLHlbl := syncEarly(aLHon, aLHcnt, holdBars, eLHlbl, low, true, bullCol)
 
     refLL = aLLon ? aLLref : zLL
     if not na(refLL) and (na(llBroken) or refLL != llBroken)
@@ -711,6 +735,8 @@ if barstate.isconfirmed
                 nFailBack += 1
             aLLon := false
             aLLcnt := 0
+    if showEarly
+        eLLlbl := syncEarly(aLLon, aLLcnt, holdBars, eLLlbl, high, false, bearCol)
 
     refGH = aGHon ? aGHref : zGH
     if not na(refGH) and (na(ghBroken) or refGH != ghBroken)
@@ -764,6 +790,8 @@ if barstate.isconfirmed
                 nFailBack += 1
             aGHon := false
             aGHcnt := 0
+    if showEarly
+        eGHlbl := syncEarly(aGHon, aGHcnt, holdBars, eGHlbl, low, true, bullCol)
 
     refGL = aGLon ? aGLref : zGL
     if not na(refGL) and (na(glBroken) or refGL != glBroken)
@@ -817,6 +845,8 @@ if barstate.isconfirmed
                 nFailBack += 1
             aGLon := false
             aGLcnt := 0
+    if showEarly
+        eGLlbl := syncEarly(aGLon, aGLcnt, holdBars, eGLlbl, high, false, bearCol)
 
     // ===== РЕТЕСТ (фильтр C, только если useRetest) =========================
     // Ждём возврата цены к пробитому уровню (touched), затем отбоя (close
