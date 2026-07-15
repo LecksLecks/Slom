@@ -32,6 +32,12 @@
 //     holdBars/wick/sweep — чисто информационная, едет по текущему бару
 //     пока попытка жива и исчезает, как только та подтвердилась или
 //     сгорела. Не меняет условие подтверждённого сигнала.
+//   - useHtfEmaFilter: EMA 50/200 старшего TF (request.security с [1] —
+//     только закрытые бары, без repaint) как ещё один пункт скора n/m,
+//     той же природы, что useEmaFilter, только не текущим TF, который сам
+//     заражается пробойной свечой. Не путать со старой "ловушкой старшего
+//     ТФ" — та была одним пивотом и не структурой, эту выпилили; здесь
+//     честная EMA, а не прокси.
 //   - Визуализация стоп/тейка на сломе (группа "9."): стоп за дальней
 //     границей сломанной зоны + буфер ATR, тейк по R:R — те же уровни,
 //     что использует strategy-компаньон для бэктеста
@@ -146,6 +152,9 @@ volMult      = input.float(1.2, "Объём: множитель от SMA", minva
 
 useEmaFilter = input.bool(false, "Слом против EMA — снижает скор", group = G6)
 
+useHtfEmaFilter = input.bool(false, "Слом против EMA старшего TF — снижает скор", group = G6)
+htfTF           = input.timeframe("240", "Старший TF (EMA 50/200), выберите выше текущего графика", group = G6)
+
 useRetest     = input.bool(false, "Требовать ретест с отбоем перед сигналом", group = G6)
 retestATR     = input.float(1.0, "Ретест: допуск от уровня, × ATR14", minval = 0.1, step = 0.1, group = G6)
 retestWindow  = input.int(10, "Ретест: окно ожидания, баров", minval = 2, group = G6)
@@ -179,6 +188,15 @@ needWickOK = refMode == "Тело + подтверждение тенью"
 emaFast  = ta.ema(close, 50)
 emaSlow  = ta.ema(close, 200)
 emaTrend = emaFast > emaSlow and close > emaFast ? 1 : emaFast < emaSlow and close < emaFast ? -1 : 0
+
+// EMA старшего TF — та же формула, что emaTrend, только на другом таймфрейме.
+// [1] внутри security = последний ЗАКРЫТЫЙ бар старшего TF, без repaint на
+// текущем незакрытом. Считаем безусловно (см. коммент у MACD выше) —
+// используется только если useHtfEmaFilter включён.
+htfEmaFast = request.security(syminfo.tickerid, htfTF, ta.ema(close, 50)[1], barmerge.gaps_off, barmerge.lookahead_off)
+htfEmaSlow = request.security(syminfo.tickerid, htfTF, ta.ema(close, 200)[1], barmerge.gaps_off, barmerge.lookahead_off)
+htfClose   = request.security(syminfo.tickerid, htfTF, close[1], barmerge.gaps_off, barmerge.lookahead_off)
+htfTrend   = htfEmaFast > htfEmaSlow and htfClose > htfEmaFast ? 1 : htfEmaFast < htfEmaSlow and htfClose < htfEmaFast ? -1 : 0
 plot(showEMA ? emaFast : na, "EMA 50",  color = color.new(#ffb74d, 0))
 plot(showEMA ? emaSlow : na, "EMA 200", color = color.new(#7e57c2, 0), linewidth = 2)
 
@@ -922,8 +940,9 @@ if barstate.isconfirmed
         // единый скор уверенности вместо зоопарка меток: считаем активные
         // проверки и сколько из них пройдено
         emaBad   = useEmaFilter and emaTrend == -1
-        totalChk = 1 + (useEmaFilter ? 1 : 0)
-        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0)
+        htfBad   = useHtfEmaFilter and htfTrend == -1
+        totalChk = 1 + (useEmaFilter ? 1 : 0) + (useHtfEmaFilter ? 1 : 0)
+        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter ? (htfBad ? 0 : 1) : 0)
         full     = passChk == totalChk
         if showLoc and not nearGlob and (full or showWeak)
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
@@ -955,8 +974,9 @@ if barstate.isconfirmed
         gRef = zGL
         nearGlob = not na(gRef) and math.abs(lvl - gRef) <= dupATR * atr14 and not na(glBar) and (bar_index - glBar <= dupWindow)
         emaBad   = useEmaFilter and emaTrend == 1
-        totalChk = 1 + (useEmaFilter ? 1 : 0)
-        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0)
+        htfBad   = useHtfEmaFilter and htfTrend == 1
+        totalChk = 1 + (useEmaFilter ? 1 : 0) + (useHtfEmaFilter ? 1 : 0)
+        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter ? (htfBad ? 0 : 1) : 0)
         full     = passChk == totalChk
         if showLoc and not nearGlob and (full or showWeak)
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
@@ -990,8 +1010,9 @@ if barstate.isconfirmed
             label.delete(locLblUp)
             locLblUp := na
         emaBad   = useEmaFilter and emaTrend == -1
-        totalChk = 1 + (useEmaFilter ? 1 : 0)
-        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0)
+        htfBad   = useHtfEmaFilter and htfTrend == -1
+        totalChk = 1 + (useEmaFilter ? 1 : 0) + (useHtfEmaFilter ? 1 : 0)
+        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter ? (htfBad ? 0 : 1) : 0)
         full     = passChk == totalChk
         if showGlob and (full or showWeak)
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
@@ -1023,8 +1044,9 @@ if barstate.isconfirmed
             label.delete(locLblDn)
             locLblDn := na
         emaBad   = useEmaFilter and emaTrend == 1
-        totalChk = 1 + (useEmaFilter ? 1 : 0)
-        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0)
+        htfBad   = useHtfEmaFilter and htfTrend == 1
+        totalChk = 1 + (useEmaFilter ? 1 : 0) + (useHtfEmaFilter ? 1 : 0)
+        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter ? (htfBad ? 0 : 1) : 0)
         full     = passChk == totalChk
         if showGlob and (full or showWeak)
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
