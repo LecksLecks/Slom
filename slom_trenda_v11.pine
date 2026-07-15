@@ -91,8 +91,21 @@
 //     max_boxes/lines/labels_count индикатора. Разведено: у стоп/тейк
 //     буфера свой лимит (maxKeepST, группа 9), верхние границы слайдеров
 //     снижены так, чтобы сумма буферов одного типа не могла превысить 500.
+//
+// ОПТИМИЗАЦИЯ ПРОИЗВОДИТЕЛЬНОСТИ (без изменения логики сигналов):
+//   - Активные зоны тянутся вправо через extend.right вместо четырёх
+//     box.set_right на КАЖДОМ подтверждённом баре; правый край фиксируется
+//     один раз (freezeBox) — при архивации или пробое зоны. Побочный
+//     визуальный эффект: активная (ещё не пробитая) зона дотягивается до
+//     правого края графика, а не до последнего бара.
+//   - Производные цвета (прозрачности от bullCol/bearCol/zoneTransp)
+//     считаются один раз в var-палитре, а не пересоздаются на каждом
+//     пивоте/сигнале.
+//   - max_boxes/lines/labels_count снижены с 500 до фактического бюджета
+//     буферов при максимальных значениях слайдеров (310/460/460) — меньше
+//     резерв памяти на инстанс индикатора.
 // =============================================================================
-indicator("Слом тренда (по методичке) v11", "СЛОМ v11", overlay = true, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
+indicator("Слом тренда (по методичке) v11", "СЛОМ v11", overlay = true, max_boxes_count = 310, max_lines_count = 460, max_labels_count = 460)
 
 // ─────────────────────────────────────────────────────────────────────────────
 G1 = "1. Структура (1H)"
@@ -173,6 +186,35 @@ maxKeepST    = input.int(60, "Хранить последних линий/ме�
 
 strictRef  = refMode == "Конец тени (строго)"
 needWickOK = refMode == "Тело + подтверждение тенью"
+
+// КЭШ ЦВЕТОВ: производные прозрачности от инпутов считаются один раз
+// (var инициализируется на первом баре), а не пересоздаются при каждом
+// пивоте/сигнале/зоне
+var color bull0  = color.new(bullCol, 0)
+var color bull10 = color.new(bullCol, 10)
+var color bull15 = color.new(bullCol, 15)
+var color bull20 = color.new(bullCol, 20)
+var color bull30 = color.new(bullCol, 30)
+var color bull45 = color.new(bullCol, 45)
+var color bull55 = color.new(bullCol, 55)
+var color bull60 = color.new(bullCol, 60)
+var color bull70 = color.new(bullCol, 70)
+var color bear0  = color.new(bearCol, 0)
+var color bear10 = color.new(bearCol, 10)
+var color bear15 = color.new(bearCol, 15)
+var color bear20 = color.new(bearCol, 20)
+var color bear30 = color.new(bearCol, 30)
+var color bear45 = color.new(bearCol, 45)
+var color bear55 = color.new(bearCol, 55)
+var color bear60 = color.new(bearCol, 60)
+var color bear70 = color.new(bearCol, 70)
+var color neut20 = color.new(color.gray, 20)
+var color neut30 = color.new(color.gray, 30)
+var color neut70 = color.new(color.gray, 70)
+var color bullZoneBg       = color.new(bullCol, zoneTransp)
+var color bearZoneBg       = color.new(bearCol, zoneTransp)
+var color bullZoneBrokenBg = color.new(bullCol, math.max(zoneTransp - 15, 0))
+var color bearZoneBrokenBg = color.new(bearCol, math.max(zoneTransp - 15, 0))
 
 // ─────────────────────────────────────────────────────────────────────────────
 emaFast  = ta.ema(close, 50)
@@ -278,6 +320,13 @@ removeLocLine(line l) =>
     idx = array.indexof(keptLocLines, l)
     if idx >= 0
         array.remove(keptLocLines, idx)
+
+// ОПТИМИЗАЦИЯ: активные зоны тянутся вправо через extend.right, а не через
+// box.set_right на каждом баре; перед архивацией правый край фиксируется
+// этим хелпером
+freezeBox(box b) =>
+    box.set_extend(b, extend.none)
+    box.set_right(b, bar_index)
 
 pushStopTake(line l) =>
     array.push(keptStopTake, l)
@@ -455,10 +504,11 @@ if barstate.isconfirmed
         divNow = divVal[locLB]
         divBear = useDiv and cls == "HH" and not na(prevLocPH_div) and divNow <= prevLocPH_div
         if showLocExt
-            c = cls == "HH" ? bullCol : cls == "LH" ? bearCol : neutCol
+            lblCol = extText ? (cls == "HH" ? bull70 : cls == "LH" ? bear70 : neut70) : (cls == "HH" ? bull30 : cls == "LH" ? bear30 : neut30)
+            txtCol = cls == "HH" ? bull0 : cls == "LH" ? bear0 : neutCol
             lblTxt = extText ? cls + (divBear ? "÷" : "") : ""
             tt = cls + (divBear ? " + MACD-дивергенция" : "") + " · " + str.tostring(phLoc, format.mintick)
-            pushExt(label.new(pb, phLoc, lblTxt, style = label.style_label_down, color = extText ? color.new(c, 70) : color.new(c, 30), textcolor = color.new(c, 0), size = size.tiny, tooltip = tt))
+            pushExt(label.new(pb, phLoc, lblTxt, style = label.style_label_down, color = lblCol, textcolor = txtCol, size = size.tiny, tooltip = tt))
         prevLocPH := phLoc
         prevLocPH_div := divNow
         lhDiv := divBear
@@ -467,12 +517,13 @@ if barstate.isconfirmed
         // её (остаётся на графике), а не стираем молча
         if not na(lhBox)
             if aLHon or rtLHon
+                freezeBox(lhBox)
                 pushLocBox(lhBox)
             else
                 box.delete(lhBox)
         lhTop := high[locLB]
         lhBot := math.max(open[locLB], close[locLB])
-        lhBox := showLocZones ? box.new(pb, lhTop, bar_index, lhBot, border_color = color.new(bearCol, 45), bgcolor = color.new(bearCol, zoneTransp), border_width = 1) : na
+        lhBox := showLocZones ? box.new(pb, lhTop, bar_index, lhBot, border_color = bear45, bgcolor = bearZoneBg, border_width = 1, extend = extend.right) : na
 
     if not na(plLoc)
         pb = bar_index - locLB
@@ -480,22 +531,24 @@ if barstate.isconfirmed
         divNow = divVal[locLB]
         divBull = useDiv and cls == "LL" and not na(prevLocPL_div) and divNow >= prevLocPL_div
         if showLocExt
-            c = cls == "HL" ? bullCol : cls == "LL" ? bearCol : neutCol
+            lblCol = extText ? (cls == "HL" ? bull70 : cls == "LL" ? bear70 : neut70) : (cls == "HL" ? bull30 : cls == "LL" ? bear30 : neut30)
+            txtCol = cls == "HL" ? bull0 : cls == "LL" ? bear0 : neutCol
             lblTxt = extText ? cls + (divBull ? "÷" : "") : ""
             tt = cls + (divBull ? " + MACD-дивергенция" : "") + " · " + str.tostring(plLoc, format.mintick)
-            pushExt(label.new(pb, plLoc, lblTxt, style = label.style_label_up, color = extText ? color.new(c, 70) : color.new(c, 30), textcolor = color.new(c, 0), size = size.tiny, tooltip = tt))
+            pushExt(label.new(pb, plLoc, lblTxt, style = label.style_label_up, color = lblCol, textcolor = txtCol, size = size.tiny, tooltip = tt))
         prevLocPL := plLoc
         prevLocPL_div := divNow
         llDiv := divBull
 
         if not na(llBox)
             if aLLon or rtLLon
+                freezeBox(llBox)
                 pushLocBox(llBox)
             else
                 box.delete(llBox)
         llBot := low[locLB]
         llTop := math.min(open[locLB], close[locLB])
-        llBox := showLocZones ? box.new(pb, llTop, bar_index, llBot, border_color = color.new(bullCol, 45), bgcolor = color.new(bullCol, zoneTransp), border_width = 1) : na
+        llBox := showLocZones ? box.new(pb, llTop, bar_index, llBot, border_color = bull45, bgcolor = bullZoneBg, border_width = 1, extend = extend.right) : na
 
     if not na(phGlob)
         pb = bar_index - globLB
@@ -503,22 +556,23 @@ if barstate.isconfirmed
         divNow = divVal[globLB]
         divBear = useDiv and cls == "HH" and not na(prevGlobPH_div) and divNow <= prevGlobPH_div
         if showGlobExt
-            c = cls == "HH" ? bullCol : cls == "LH" ? bearCol : neutCol
+            lblCol = cls == "HH" ? bull20 : cls == "LH" ? bear20 : neut20
             lblTxt = extText ? cls + (divBear ? "÷" : "") : ""
             tt = "ГЛОБАЛЬНЫЙ " + cls + (divBear ? " + MACD-дивергенция" : "") + " · " + str.tostring(phGlob, format.mintick)
-            pushExt(label.new(pb, phGlob, lblTxt, style = label.style_label_down, color = color.new(c, 20), textcolor = color.white, size = size.small, tooltip = tt))
+            pushExt(label.new(pb, phGlob, lblTxt, style = label.style_label_down, color = lblCol, textcolor = color.white, size = size.small, tooltip = tt))
         prevGlobPH := phGlob
         prevGlobPH_div := divNow
         ghDiv := divBear
 
         if not na(ghBox)
             if aGHon or rtGHon
+                freezeBox(ghBox)
                 pushGlobBox(ghBox)
             else
                 box.delete(ghBox)
         ghTop := high[globLB]
         ghBot := math.max(open[globLB], close[globLB])
-        ghBox := showGlobZones ? box.new(pb, ghTop, bar_index, ghBot, border_color = color.new(bearCol, 10), bgcolor = color.new(bearCol, zoneTransp), border_width = 2) : na
+        ghBox := showGlobZones ? box.new(pb, ghTop, bar_index, ghBot, border_color = bear10, bgcolor = bearZoneBg, border_width = 2, extend = extend.right) : na
         ghBar := bar_index
 
     if not na(plGlob)
@@ -527,32 +581,24 @@ if barstate.isconfirmed
         divNow = divVal[globLB]
         divBull = useDiv and cls == "LL" and not na(prevGlobPL_div) and divNow >= prevGlobPL_div
         if showGlobExt
-            c = cls == "HL" ? bullCol : cls == "LL" ? bearCol : neutCol
+            lblCol = cls == "HL" ? bull20 : cls == "LL" ? bear20 : neut20
             lblTxt = extText ? cls + (divBull ? "÷" : "") : ""
             tt = "ГЛОБАЛЬНЫЙ " + cls + (divBull ? " + MACD-дивергенция" : "") + " · " + str.tostring(plGlob, format.mintick)
-            pushExt(label.new(pb, plGlob, lblTxt, style = label.style_label_up, color = color.new(c, 20), textcolor = color.white, size = size.small, tooltip = tt))
+            pushExt(label.new(pb, plGlob, lblTxt, style = label.style_label_up, color = lblCol, textcolor = color.white, size = size.small, tooltip = tt))
         prevGlobPL := plGlob
         prevGlobPL_div := divNow
         glDiv := divBull
 
         if not na(glBox)
             if aGLon or rtGLon
+                freezeBox(glBox)
                 pushGlobBox(glBox)
             else
                 box.delete(glBox)
         glBot := low[globLB]
         glTop := math.min(open[globLB], close[globLB])
-        glBox := showGlobZones ? box.new(pb, glTop, bar_index, glBot, border_color = color.new(bullCol, 10), bgcolor = color.new(bullCol, zoneTransp), border_width = 2) : na
+        glBox := showGlobZones ? box.new(pb, glTop, bar_index, glBot, border_color = bull10, bgcolor = bullZoneBg, border_width = 2, extend = extend.right) : na
         glBar := bar_index
-
-    if not na(lhBox)
-        box.set_right(lhBox, bar_index)
-    if not na(llBox)
-        box.set_right(llBox, bar_index)
-    if not na(ghBox)
-        box.set_right(ghBox, bar_index)
-    if not na(glBox)
-        box.set_right(glBox, bar_index)
 
     // ===== СБРОС «УЖЕ СЛОМАН» ===============================================
     // фикс #5: сбрасываем *Far вместе с *Broken
@@ -633,7 +679,8 @@ if barstate.isconfirmed
                 lhBroken := aLHref
                 lhBrokenFar := aLHfar
                 if keepBroken and not na(lhBox)
-                    box.set_bgcolor(lhBox, color.new(bearCol, math.max(zoneTransp - 15, 0)))
+                    freezeBox(lhBox)
+                    box.set_bgcolor(lhBox, bearZoneBrokenBg)
                     pushLocBox(lhBox)
                     lhBox := na
                 if useRetest
@@ -691,7 +738,8 @@ if barstate.isconfirmed
                 llBroken := aLLref
                 llBrokenFar := aLLfar
                 if keepBroken and not na(llBox)
-                    box.set_bgcolor(llBox, color.new(bullCol, math.max(zoneTransp - 15, 0)))
+                    freezeBox(llBox)
+                    box.set_bgcolor(llBox, bullZoneBrokenBg)
                     pushLocBox(llBox)
                     llBox := na
                 if useRetest
@@ -746,7 +794,8 @@ if barstate.isconfirmed
                 ghBroken := aGHref
                 ghBrokenFar := aGHfar
                 if keepBroken and not na(ghBox)
-                    box.set_bgcolor(ghBox, color.new(bearCol, math.max(zoneTransp - 15, 0)))
+                    freezeBox(ghBox)
+                    box.set_bgcolor(ghBox, bearZoneBrokenBg)
                     pushGlobBox(ghBox)
                     ghBox := na
                 if useRetest
@@ -801,7 +850,8 @@ if barstate.isconfirmed
                 glBroken := aGLref
                 glBrokenFar := aGLfar
                 if keepBroken and not na(glBox)
-                    box.set_bgcolor(glBox, color.new(bullCol, math.max(zoneTransp - 15, 0)))
+                    freezeBox(glBox)
+                    box.set_bgcolor(glBox, bullZoneBrokenBg)
                     pushGlobBox(glBox)
                     glBox := na
                 if useRetest
@@ -917,12 +967,12 @@ if barstate.isconfirmed
         if alertLocUp
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
             txt = "ЛОК↑" + scoreTxt
-            lb = label.new(bar_index, low, txt, style = label.style_label_up, color = color.new(bullCol, full ? 15 : 60), textcolor = color.white, size = size.tiny, tooltip = "ЛОКАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
+            lb = label.new(bar_index, low, txt, style = label.style_label_up, color = full ? bull15 : bull60, textcolor = color.white, size = size.tiny, tooltip = "ЛОКАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
             pushSig(lb)   // фикс #4
             locLblUp := lb
             locLblUpBar := bar_index
             if showBrokenRef
-                ln = line.new(stb, lvl, bar_index, lvl, color = color.new(bullCol, 30), style = line.style_dotted, width = 1)
+                ln = line.new(stb, lvl, bar_index, lvl, color = bull30, style = line.style_dotted, width = 1)
                 pushLocLine(ln)
                 locLineUp := ln
             else
@@ -932,9 +982,9 @@ if barstate.isconfirmed
             stopDist = close - stopLvl
             if stopDist > 0
                 takeLvl = close + stopDist * rrRatioViz
-                pushStopTake(line.new(bar_index, stopLvl, bar_index + 30, stopLvl, color = color.new(bearCol, 0), style = line.style_dashed, width = 1))
-                pushStopTake(line.new(bar_index, takeLvl, bar_index + 30, takeLvl, color = color.new(bullCol, 0), style = line.style_dashed, width = 1))
-                pushStopTakeLbl(label.new(bar_index + 30, takeLvl, "TP " + str.tostring(rrRatioViz, "#.#") + "R", style = label.style_label_left, color = color.new(bullCol, 20), textcolor = color.white, size = size.tiny))
+                pushStopTake(line.new(bar_index, stopLvl, bar_index + 30, stopLvl, color = bear0, style = line.style_dashed, width = 1))
+                pushStopTake(line.new(bar_index, takeLvl, bar_index + 30, takeLvl, color = bull0, style = line.style_dashed, width = 1))
+                pushStopTakeLbl(label.new(bar_index + 30, takeLvl, "TP " + str.tostring(rrRatioViz, "#.#") + "R", style = label.style_label_left, color = bull20, textcolor = color.white, size = size.tiny))
 
     if sigLocDn
         nLocSlom += 1
@@ -955,12 +1005,12 @@ if barstate.isconfirmed
         if alertLocDn
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
             txt = "ЛОК↓" + scoreTxt
-            lb = label.new(bar_index, high, txt, style = label.style_label_down, color = color.new(bearCol, full ? 15 : 60), textcolor = color.white, size = size.tiny, tooltip = "ЛОКАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
+            lb = label.new(bar_index, high, txt, style = label.style_label_down, color = full ? bear15 : bear60, textcolor = color.white, size = size.tiny, tooltip = "ЛОКАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
             pushSig(lb)
             locLblDn := lb
             locLblDnBar := bar_index
             if showBrokenRef
-                ln = line.new(stb, lvl, bar_index, lvl, color = color.new(bearCol, 30), style = line.style_dotted, width = 1)
+                ln = line.new(stb, lvl, bar_index, lvl, color = bear30, style = line.style_dotted, width = 1)
                 pushLocLine(ln)
                 locLineDn := ln
             else
@@ -970,9 +1020,9 @@ if barstate.isconfirmed
             stopDist = stopLvl - close
             if stopDist > 0
                 takeLvl = close - stopDist * rrRatioViz
-                pushStopTake(line.new(bar_index, stopLvl, bar_index + 30, stopLvl, color = color.new(bearCol, 0), style = line.style_dashed, width = 1))
-                pushStopTake(line.new(bar_index, takeLvl, bar_index + 30, takeLvl, color = color.new(bullCol, 0), style = line.style_dashed, width = 1))
-                pushStopTakeLbl(label.new(bar_index + 30, takeLvl, "TP " + str.tostring(rrRatioViz, "#.#") + "R", style = label.style_label_left, color = color.new(bearCol, 20), textcolor = color.white, size = size.tiny))
+                pushStopTake(line.new(bar_index, stopLvl, bar_index + 30, stopLvl, color = bear0, style = line.style_dashed, width = 1))
+                pushStopTake(line.new(bar_index, takeLvl, bar_index + 30, takeLvl, color = bull0, style = line.style_dashed, width = 1))
+                pushStopTakeLbl(label.new(bar_index + 30, takeLvl, "TP " + str.tostring(rrRatioViz, "#.#") + "R", style = label.style_label_left, color = bear20, textcolor = color.white, size = size.tiny))
 
     if sigGlobUp
         nGlobSlom += 1
@@ -1005,18 +1055,18 @@ if barstate.isconfirmed
         if alertGlobUp
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
             txt = "ГЛОБ↑" + scoreTxt
-            glb = label.new(bar_index, low, txt, style = label.style_label_up, color = color.new(bullCol, full ? 0 : 55), textcolor = color.white, size = size.small, tooltip = "ГЛОБАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
+            glb = label.new(bar_index, low, txt, style = label.style_label_up, color = full ? bull0 : bull55, textcolor = color.white, size = size.small, tooltip = "ГЛОБАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
             pushSig(glb)
             if showBrokenRef
-                pushGlobLine(line.new(stb, lvl, bar_index, lvl, color = color.new(bullCol, 10), style = line.style_dashed, width = 1))
+                pushGlobLine(line.new(stb, lvl, bar_index, lvl, color = bull10, style = line.style_dashed, width = 1))
         if showStopTake
             stopLvl = sFarGlobUp - slBufferViz * atr14
             stopDist = close - stopLvl
             if stopDist > 0
                 takeLvl = close + stopDist * rrRatioViz
-                pushStopTake(line.new(bar_index, stopLvl, bar_index + 30, stopLvl, color = color.new(bearCol, 0), style = line.style_dashed, width = 2))
-                pushStopTake(line.new(bar_index, takeLvl, bar_index + 30, takeLvl, color = color.new(bullCol, 0), style = line.style_dashed, width = 2))
-                pushStopTakeLbl(label.new(bar_index + 30, takeLvl, "TP " + str.tostring(rrRatioViz, "#.#") + "R", style = label.style_label_left, color = color.new(bullCol, 20), textcolor = color.white, size = size.small))
+                pushStopTake(line.new(bar_index, stopLvl, bar_index + 30, stopLvl, color = bear0, style = line.style_dashed, width = 2))
+                pushStopTake(line.new(bar_index, takeLvl, bar_index + 30, takeLvl, color = bull0, style = line.style_dashed, width = 2))
+                pushStopTakeLbl(label.new(bar_index + 30, takeLvl, "TP " + str.tostring(rrRatioViz, "#.#") + "R", style = label.style_label_left, color = bull20, textcolor = color.white, size = size.small))
 
     if sigGlobDn
         nGlobSlom += 1
@@ -1045,18 +1095,18 @@ if barstate.isconfirmed
         if alertGlobDn
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
             txt = "ГЛОБ↓" + scoreTxt
-            glb = label.new(bar_index, high, txt, style = label.style_label_down, color = color.new(bearCol, full ? 0 : 55), textcolor = color.white, size = size.small, tooltip = "ГЛОБАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
+            glb = label.new(bar_index, high, txt, style = label.style_label_down, color = full ? bear0 : bear55, textcolor = color.white, size = size.small, tooltip = "ГЛОБАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
             pushSig(glb)
             if showBrokenRef
-                pushGlobLine(line.new(stb, lvl, bar_index, lvl, color = color.new(bearCol, 10), style = line.style_dashed, width = 1))
+                pushGlobLine(line.new(stb, lvl, bar_index, lvl, color = bear10, style = line.style_dashed, width = 1))
         if showStopTake
             stopLvl = sFarGlobDn + slBufferViz * atr14
             stopDist = stopLvl - close
             if stopDist > 0
                 takeLvl = close - stopDist * rrRatioViz
-                pushStopTake(line.new(bar_index, stopLvl, bar_index + 30, stopLvl, color = color.new(bearCol, 0), style = line.style_dashed, width = 2))
-                pushStopTake(line.new(bar_index, takeLvl, bar_index + 30, takeLvl, color = color.new(bullCol, 0), style = line.style_dashed, width = 2))
-                pushStopTakeLbl(label.new(bar_index + 30, takeLvl, "TP " + str.tostring(rrRatioViz, "#.#") + "R", style = label.style_label_left, color = color.new(bearCol, 20), textcolor = color.white, size = size.small))
+                pushStopTake(line.new(bar_index, stopLvl, bar_index + 30, stopLvl, color = bear0, style = line.style_dashed, width = 2))
+                pushStopTake(line.new(bar_index, takeLvl, bar_index + 30, takeLvl, color = bull0, style = line.style_dashed, width = 2))
+                pushStopTakeLbl(label.new(bar_index + 30, takeLvl, "TP " + str.tostring(rrRatioViz, "#.#") + "R", style = label.style_label_left, color = bear20, textcolor = color.white, size = size.small))
 
 // ─────────────────────────────────────────────────────────────────────────────
 plotshape(showFailed and failedTry, "Сгоревшая попытка закрепа", shape.xcross, location.belowbar, color.new(color.gray, 55), size = size.tiny)
