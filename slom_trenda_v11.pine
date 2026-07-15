@@ -79,6 +79,18 @@
 //   только через lookback баров (пивот подтверждается справа). На истории она
 //   выглядит так, будто была видна сразу — это не так. Repaint'а нет, но и
 //   «предсказания» нет: в реальном времени HH проявится на 5 (или 20) баров позже.
+//
+// ФИКСЫ ПОСЛЕ ПОЛНОГО АУДИТА (без изменения версии/логики сигналов):
+//   - alertcondition раньше стрелял по сырому sigLocUp/sigGlobUp и т.д. —
+//     до применения showLoc/showGlob/showWeak/nearGlob/скора. Теперь алерты
+//     используют те же гейты, что и метки на графике (alertLocUp/alertGlobUp
+//     и т.д.), поэтому скрытые слабые/дублирующие сигналы больше не шлют алерт.
+//   - maxKeep и maxExt делили один и тот же слайдер сразу на несколько
+//     независимых буферов линий/меток одного типа, из-за чего на верхних
+//     значениях слайдеров суммарно можно было превысить глобальные
+//     max_boxes/lines/labels_count индикатора. Разведено: у стоп/тейк
+//     буфера свой лимит (maxKeepST, группа 9), верхние границы слайдеров
+//     снижены так, чтобы сумма буферов одного типа не могла превысить 500.
 // =============================================================================
 indicator("Слом тренда (по методичке) v11", "СЛОМ v11", overlay = true, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
 
@@ -91,7 +103,7 @@ G0 = "2. Экстремумы"
 showLocExt  = input.bool(true,  "Локальные экстремумы (HH/HL/LH/LL)", group = G0)
 showGlobExt = input.bool(true,  "Глобальные экстремумы", group = G0)
 extText     = input.bool(true,  "Подписи, а не точки", group = G0)
-maxExt      = input.int(80, "Хранить последних экстремумов", minval = 10, maxval = 300, group = G0, tooltip = "Кольцевой буфер: старые метки удаляются явно.")
+maxExt      = input.int(80, "Хранить последних экстремумов", minval = 10, maxval = 150, group = G0, tooltip = "Кольцевой буфер: старые метки удаляются явно.")
 
 G2 = "3. Закреп"
 refMode = input.string("Тело + подтверждение тенью", "Точка отсчёта пробоя", options = ["Конец тени (строго)", "Тело (мягко, слом внутри зоны)", "Тело + подтверждение тенью"], group = G2)
@@ -117,7 +129,7 @@ showLocZones  = input.bool(true, "Зоны локальных сломов", gro
 showGlobZones = input.bool(true, "Зоны глобальных сломов", group = G4)
 keepBroken    = input.bool(true, "Оставлять пробитые зоны", group = G4)
 showBrokenRef = input.bool(true, "Линия пробитого уровня", group = G4)
-maxKeep       = input.int(60, "Хранить последних пробитых зон/линий/меток (отдельно лок. и глоб.)", minval = 5, maxval = 200, group = G4)
+maxKeep       = input.int(60, "Хранить последних пробитых зон/линий/меток (отдельно лок. и глоб.)", minval = 5, maxval = 150, group = G4)
 zoneTransp    = input.int(85, "Прозрачность зон, %", minval = 0, maxval = 100, group = G4)
 showLoc       = input.bool(true, "Метки локальных сломов", group = G4)
 showGlob      = input.bool(true, "Метки глобальных сломов", group = G4)
@@ -157,6 +169,7 @@ G9 = "9. Стоп/тейк на сломе"
 showStopTake = input.bool(false, "Показывать стоп/тейк на сломе", group = G9)
 rrRatioViz   = input.float(3.0, "R:R", minval = 0.5, step = 0.5, group = G9)
 slBufferViz  = input.float(0.3, "Стоп: доп. буфер за зоной, × ATR14", minval = 0, step = 0.1, group = G9)
+maxKeepST    = input.int(60, "Хранить последних линий/меток стоп-тейка", minval = 5, maxval = 150, group = G9)
 
 strictRef  = refMode == "Конец тени (строго)"
 needWickOK = refMode == "Тело + подтверждение тенью"
@@ -198,8 +211,11 @@ impUpC   = useImpulse and impBody and close > open and volOK
 impDnC   = useImpulse and impBody and close < open and volOK
 
 // фильтр «сессия»: разрешаем НАЧИНАТЬ отслеживать пробой только внутри сессии
-// (уже идущую попытку сессия не прерывает — гейт только на старте)
-sessOK = not useSession or not na(time(timeframe.period, sessTime, "UTC"))
+// (уже идущую попытку сессия не прерывает — гейт только на старте).
+// БАГФИКС 2: time() с сессией вне интрадея всегда возвращает na — раньше на
+// D/W/M включённый фильтр молча блокировал ВСЕ новые попытки; теперь на
+// не-интрадей таймфреймах фильтр просто неактивен
+sessOK = not useSession or not timeframe.isintraday or not na(time(timeframe.period, sessTime, "UTC"))
 
 // фильтр «сквиз»: не начинать пробой, если текущий ATR аномально ниже своей средней
 atrSMA    = ta.sma(atr14, atrSmaLen)
@@ -256,14 +272,21 @@ removeSig(label lb) =>
     if idx >= 0
         array.remove(keptSig, idx)
 
+// БАГФИКС 4: дубль ЛОК/ГЛОБ вычищает и dotted-линию локального сигнала,
+// поэтому её тоже нужно уметь убирать из кольцевого буфера перед удалением
+removeLocLine(line l) =>
+    idx = array.indexof(keptLocLines, l)
+    if idx >= 0
+        array.remove(keptLocLines, idx)
+
 pushStopTake(line l) =>
     array.push(keptStopTake, l)
-    while array.size(keptStopTake) > maxKeep
+    while array.size(keptStopTake) > maxKeepST
         line.delete(array.shift(keptStopTake))
 
 pushStopTakeLbl(label lb) =>
     array.push(keptStopTakeLbl, lb)
-    while array.size(keptStopTakeLbl) > maxKeep
+    while array.size(keptStopTakeLbl) > maxKeepST
         label.delete(array.shift(keptStopTakeLbl))
 
 // ЭКСТРЕМУМЫ: предыдущие значения для классификации ----------------------------
@@ -351,6 +374,10 @@ var label locLblUp = na
 var int   locLblUpBar = na
 var label locLblDn = na
 var int   locLblDnBar = na
+// БАГФИКС 4: dotted-линия локального сигнала отслеживается так же, как метка,
+// чтобы глобальный дубль убирал их вместе
+var line  locLineUp = na
+var line  locLineDn = na
 
 var int nStarted    = 0
 var int nFailBack   = 0
@@ -396,6 +423,15 @@ bool sigLocDn  = false
 bool sigGlobUp = false
 bool sigGlobDn = false
 bool failedTry = false
+
+// алерты должны стрелять только по тем же сигналам, что реально видны на
+// графике — то есть после showLoc/showGlob/showWeak/nearGlob/скора,
+// а не по сырым sigLocUp/sigGlobUp и т.д. (иначе алерт мог прийти по
+// сигналу, который сам же индикатор пометил слабым/дублем и скрыл)
+bool alertLocUp  = false
+bool alertLocDn  = false
+bool alertGlobUp = false
+bool alertGlobDn = false
 
 float sLvlLocUp = na
 float sLvlLocDn = na
@@ -601,6 +637,11 @@ if barstate.isconfirmed
                     pushLocBox(lhBox)
                     lhBox := na
                 if useRetest
+                    // БАГФИКС 3: висящий ретест, перезаписанный новым закрепом
+                    // того же типа, учитывается как неподтверждённый, а не
+                    // теряется молча (оседая в «невязке» воронки)
+                    if rtLHon
+                        nRetestFail += 1
                     rtLHon := true
                     rtLHlvl := aLHref
                     rtLHbar := bar_index
@@ -654,6 +695,8 @@ if barstate.isconfirmed
                     pushLocBox(llBox)
                     llBox := na
                 if useRetest
+                    if rtLLon
+                        nRetestFail += 1
                     rtLLon := true
                     rtLLlvl := aLLref
                     rtLLbar := bar_index
@@ -707,6 +750,8 @@ if barstate.isconfirmed
                     pushGlobBox(ghBox)
                     ghBox := na
                 if useRetest
+                    if rtGHon
+                        nRetestFail += 1
                     rtGHon := true
                     rtGHlvl := aGHref
                     rtGHbar := bar_index
@@ -760,6 +805,8 @@ if barstate.isconfirmed
                     pushGlobBox(glBox)
                     glBox := na
                 if useRetest
+                    if rtGLon
+                        nRetestFail += 1
                     rtGLon := true
                     rtGLlvl := aGLref
                     rtGLbar := bar_index
@@ -788,7 +835,11 @@ if barstate.isconfirmed
     // ===== РЕТЕСТ (фильтр C, только если useRetest) =========================
     // Ждём возврата цены к пробитому уровню (touched), затем отбоя (close
     // снова за уровнем). Не дождались за retestWindow баров — сигнал сгорает.
-    if rtLHon
+    // БАГФИКС 1: бар взведения (bar_index == rt*bar) пропускается — раньше
+    // свеча закрепа сама засчитывала и «касание» (её low/high почти всегда в
+    // допуске от уровня), и «отбой» (close за уровнем — это и есть условие
+    // закрепа), поэтому сигнал вылетал в тот же бар и ретест ничего не фильтровал
+    if rtLHon and bar_index > rtLHbar
         if not rtLHtouched and low <= rtLHlvl + retestATR * atr14
             rtLHtouched := true
         if rtLHtouched and close > rtLHlvl
@@ -801,7 +852,7 @@ if barstate.isconfirmed
             rtLHon := false
             nRetestFail += 1
 
-    if rtLLon
+    if rtLLon and bar_index > rtLLbar
         if not rtLLtouched and high >= rtLLlvl - retestATR * atr14
             rtLLtouched := true
         if rtLLtouched and close < rtLLlvl
@@ -814,7 +865,7 @@ if barstate.isconfirmed
             rtLLon := false
             nRetestFail += 1
 
-    if rtGHon
+    if rtGHon and bar_index > rtGHbar
         if not rtGHtouched and low <= rtGHlvl + retestATR * atr14
             rtGHtouched := true
         if rtGHtouched and close > rtGHlvl
@@ -827,7 +878,7 @@ if barstate.isconfirmed
             rtGHon := false
             nRetestFail += 1
 
-    if rtGLon
+    if rtGLon and bar_index > rtGLbar
         if not rtGLtouched and high >= rtGLlvl - retestATR * atr14
             rtGLtouched := true
         if rtGLtouched and close < rtGLlvl
@@ -862,7 +913,8 @@ if barstate.isconfirmed
         totalChk = 1 + (useEmaFilter ? 1 : 0)
         passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0)
         full     = passChk == totalChk
-        if showLoc and not nearGlob and (full or showWeak)
+        alertLocUp := showLoc and not nearGlob and (full or showWeak)
+        if alertLocUp
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
             txt = "ЛОК↑" + scoreTxt
             lb = label.new(bar_index, low, txt, style = label.style_label_up, color = color.new(bullCol, full ? 15 : 60), textcolor = color.white, size = size.tiny, tooltip = "ЛОКАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
@@ -870,7 +922,11 @@ if barstate.isconfirmed
             locLblUp := lb
             locLblUpBar := bar_index
             if showBrokenRef
-                pushLocLine(line.new(stb, lvl, bar_index, lvl, color = color.new(bullCol, 30), style = line.style_dotted, width = 1))
+                ln = line.new(stb, lvl, bar_index, lvl, color = color.new(bullCol, 30), style = line.style_dotted, width = 1)
+                pushLocLine(ln)
+                locLineUp := ln
+            else
+                locLineUp := na
         if showStopTake
             stopLvl = sFarLocUp - slBufferViz * atr14
             stopDist = close - stopLvl
@@ -895,7 +951,8 @@ if barstate.isconfirmed
         totalChk = 1 + (useEmaFilter ? 1 : 0)
         passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0)
         full     = passChk == totalChk
-        if showLoc and not nearGlob and (full or showWeak)
+        alertLocDn := showLoc and not nearGlob and (full or showWeak)
+        if alertLocDn
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
             txt = "ЛОК↓" + scoreTxt
             lb = label.new(bar_index, high, txt, style = label.style_label_down, color = color.new(bearCol, full ? 15 : 60), textcolor = color.white, size = size.tiny, tooltip = "ЛОКАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
@@ -903,7 +960,11 @@ if barstate.isconfirmed
             locLblDn := lb
             locLblDnBar := bar_index
             if showBrokenRef
-                pushLocLine(line.new(stb, lvl, bar_index, lvl, color = color.new(bearCol, 30), style = line.style_dotted, width = 1))
+                ln = line.new(stb, lvl, bar_index, lvl, color = color.new(bearCol, 30), style = line.style_dotted, width = 1)
+                pushLocLine(ln)
+                locLineDn := ln
+            else
+                locLineDn := na
         if showStopTake
             stopLvl = sFarLocDn + slBufferViz * atr14
             stopDist = stopLvl - close
@@ -926,11 +987,22 @@ if barstate.isconfirmed
             removeSig(locLblUp)   // фикс #4: убираем из буфера прежде, чем удалить объект
             label.delete(locLblUp)
             locLblUp := na
+            // БАГФИКС 4: дубль вычищается целиком — вместе с меткой удаляется
+            // её dotted-линия уровня; если дубль случился в том же баре,
+            // подавляем и локальный алерт (кросс-барный алерт уже ушёл,
+            // его не отозвать)
+            if not na(locLineUp)
+                removeLocLine(locLineUp)
+                line.delete(locLineUp)
+                locLineUp := na
+            if locLblUpBar == bar_index
+                alertLocUp := false
         emaBad   = useEmaFilter and emaTrend == -1
         totalChk = 1 + (useEmaFilter ? 1 : 0)
         passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0)
         full     = passChk == totalChk
-        if showGlob and (full or showWeak)
+        alertGlobUp := showGlob and (full or showWeak)
+        if alertGlobUp
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
             txt = "ГЛОБ↑" + scoreTxt
             glb = label.new(bar_index, low, txt, style = label.style_label_up, color = color.new(bullCol, full ? 0 : 55), textcolor = color.white, size = size.small, tooltip = "ГЛОБАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
@@ -959,11 +1031,18 @@ if barstate.isconfirmed
             removeSig(locLblDn)
             label.delete(locLblDn)
             locLblDn := na
+            if not na(locLineDn)
+                removeLocLine(locLineDn)
+                line.delete(locLineDn)
+                locLineDn := na
+            if locLblDnBar == bar_index
+                alertLocDn := false
         emaBad   = useEmaFilter and emaTrend == 1
         totalChk = 1 + (useEmaFilter ? 1 : 0)
         passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0)
         full     = passChk == totalChk
-        if showGlob and (full or showWeak)
+        alertGlobDn := showGlob and (full or showWeak)
+        if alertGlobDn
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
             txt = "ГЛОБ↓" + scoreTxt
             glb = label.new(bar_index, high, txt, style = label.style_label_down, color = color.new(bearCol, full ? 0 : 55), textcolor = color.white, size = size.small, tooltip = "ГЛОБАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
@@ -1034,7 +1113,7 @@ if (showTrend or showFunnel) and barstate.islast
         table.cell(tp, 1, 11, str.tostring(nLocSlom) + " / " + str.tostring(nGlobSlom) + (na(conv) ? "" : "  " + str.tostring(conv, "#") + "%"), text_size = size.tiny, text_color = txtC, bgcolor = hdrBg)
 
 // ─────────────────────────────────────────────────────────────────────────────
-alertcondition(sigGlobUp, "Глобальный слом ВВЕРХ", "Слом: глобальный ВВЕРХ")
-alertcondition(sigGlobDn, "Глобальный слом ВНИЗ",  "Слом: глобальный ВНИЗ")
-alertcondition(sigLocUp,  "Локальный слом ВВЕРХ",  "Слом: локальный ВВЕРХ")
-alertcondition(sigLocDn,  "Локальный слом ВНИЗ",   "Слом: локальный ВНИЗ")
+alertcondition(alertGlobUp, "Глобальный слом ВВЕРХ", "Слом: глобальный ВВЕРХ")
+alertcondition(alertGlobDn, "Глобальный слом ВНИЗ",  "Слом: глобальный ВНИЗ")
+alertcondition(alertLocUp,  "Локальный слом ВВЕРХ",  "Слом: локальный ВВЕРХ")
+alertcondition(alertLocDn,  "Локальный слом ВНИЗ",   "Слом: локальный ВНИЗ")
