@@ -1,0 +1,163 @@
+//@version=6
+// =============================================================================
+// SMART MONEY CONCEPT v1 — структура рынка, ликвидность, ордер-блоки, FVG
+//
+// Строго по концепции Smart Money: BOS/CHoCH по свинг-структуре, равные
+// хай/лои как зоны ликвидности, ордер-блоки как источник импульса,
+// Fair Value Gap как незакрытый дисбаланс. Никаких посторонних фильтров
+// (EMA/объём/сессия) — только сама концепция.
+// =============================================================================
+
+indicator("Smart Money Concept v1", "SMC v1", overlay = true, max_boxes_count = 300, max_lines_count = 300, max_labels_count = 300)
+
+G_STRUCT = "1. Структура (BOS/CHoCH)"
+G_LIQ    = "2. Ликвидность (EQH/EQL)"
+G_OB     = "3. Ордер-блоки"
+G_FVG    = "4. Fair Value Gap"
+
+swingLen   = input.int(5, "Длина пивота (свинг хай/лоу)", minval = 2, group = G_STRUCT)
+showBOS    = input.bool(true, "Показывать BOS", group = G_STRUCT)
+showCHOCH  = input.bool(true, "Показывать CHoCH", group = G_STRUCT)
+bullCol    = input.color(#26a69a, "Бычий цвет", inline = "c", group = G_STRUCT)
+bearCol    = input.color(#ef5350, "Медвежий цвет", inline = "c", group = G_STRUCT)
+
+showEQ = input.bool(true, "Показывать равные хай/лои", group = G_LIQ)
+eqTol  = input.float(0.1, "Допуск равенства, × ATR14", minval = 0.0, step = 0.05, group = G_LIQ)
+
+showOB     = input.bool(true, "Показывать ордер-блоки", group = G_OB)
+obLookback = input.int(50, "Искать ордер-блок в пределах, баров", minval = 5, maxval = 200, group = G_OB)
+obMax      = input.int(3, "Хранить последних ордер-блоков (на сторону)", minval = 1, maxval = 20, group = G_OB)
+mitigateOB = input.bool(true, "Удалять ордер-блок при митигации", group = G_OB)
+
+showFVG     = input.bool(true, "Показывать Fair Value Gap", group = G_FVG)
+fvgMax      = input.int(5, "Хранить последних FVG (на сторону)", minval = 1, maxval = 30, group = G_FVG)
+mitigateFVG = input.bool(true, "Удалять FVG при митигации", group = G_FVG)
+
+atr14 = ta.atr(14)
+
+// ---- Структура: свинг хай/лоу и BOS/CHoCH ----
+ph = ta.pivothigh(swingLen, swingLen)
+pl = ta.pivotlow(swingLen, swingLen)
+
+var float swingHigh    = na
+var float swingLow     = na
+var float prevPH       = na
+var int   prevPHBar    = na
+var float prevPL       = na
+var int   prevPLBar    = na
+var int   trend        = 0            // ponytail: 0 = структура ещё не установлена, первый пробой считается BOS
+var float lastBrokenHigh = na
+var float lastBrokenLow  = na
+
+if not na(ph)
+    phBar = bar_index - swingLen
+    if showEQ and not na(prevPH) and math.abs(ph - prevPH) <= atr14 * eqTol
+        line.new(prevPHBar, prevPH, phBar, ph, color = color.orange, width = 1)
+        label.new(int(math.avg(prevPHBar, phBar)), math.max(ph, prevPH), "EQH", style = label.style_label_down, color = na, textcolor = color.orange, size = size.tiny)
+    prevPH := ph
+    prevPHBar := phBar
+    swingHigh := ph
+
+if not na(pl)
+    plBar = bar_index - swingLen
+    if showEQ and not na(prevPL) and math.abs(pl - prevPL) <= atr14 * eqTol
+        line.new(prevPLBar, prevPL, plBar, pl, color = color.purple, width = 1)
+        label.new(int(math.avg(prevPLBar, plBar)), math.min(pl, prevPL), "EQL", style = label.style_label_up, color = na, textcolor = color.purple, size = size.tiny)
+    prevPL := pl
+    prevPLBar := plBar
+    swingLow := pl
+
+bullBreak = not na(swingHigh) and close > swingHigh and swingHigh != lastBrokenHigh
+bearBreak = not na(swingLow)  and close < swingLow  and swingLow  != lastBrokenLow
+
+isBOS_up   = bullBreak and trend >= 0
+isCHOCH_up = bullBreak and trend < 0
+isBOS_dn   = bearBreak and trend <= 0
+isCHOCH_dn = bearBreak and trend > 0
+
+if bullBreak
+    if showBOS and isBOS_up
+        label.new(bar_index, swingHigh, "BOS", style = label.style_label_down, color = bullCol, textcolor = color.white, size = size.small)
+    if showCHOCH and isCHOCH_up
+        label.new(bar_index, swingHigh, "CHoCH", style = label.style_label_down, color = bullCol, textcolor = color.white, size = size.small)
+    lastBrokenHigh := swingHigh
+    trend := 1
+
+if bearBreak
+    if showBOS and isBOS_dn
+        label.new(bar_index, swingLow, "BOS", style = label.style_label_up, color = bearCol, textcolor = color.white, size = size.small)
+    if showCHOCH and isCHOCH_dn
+        label.new(bar_index, swingLow, "CHoCH", style = label.style_label_up, color = bearCol, textcolor = color.white, size = size.small)
+    lastBrokenLow := swingLow
+    trend := -1
+
+// ---- Ордер-блоки: последняя противоположная свеча перед импульсом слома ----
+findOpposite(bullish, maxBack) =>
+    idx = -1
+    for i = 1 to maxBack
+        if bullish and close[i] < open[i]
+            idx := i
+            break
+        if not bullish and close[i] > open[i]
+            idx := i
+            break
+    idx
+
+var bullOB = array.new<box>(0)
+var bearOB = array.new<box>(0)
+
+if showOB and bullBreak
+    idx = findOpposite(true, obLookback)
+    if idx != -1
+        b = box.new(bar_index - idx, high[idx], bar_index, low[idx], border_color = bullCol, bgcolor = color.new(bullCol, 85), extend = extend.none)
+        array.push(bullOB, b)
+        if array.size(bullOB) > obMax
+            box.delete(array.shift(bullOB))
+
+if showOB and bearBreak
+    idx = findOpposite(false, obLookback)
+    if idx != -1
+        b = box.new(bar_index - idx, high[idx], bar_index, low[idx], border_color = bearCol, bgcolor = color.new(bearCol, 85), extend = extend.none)
+        array.push(bearOB, b)
+        if array.size(bearOB) > obMax
+            box.delete(array.shift(bearOB))
+
+// ---- Fair Value Gap: разрыв между тенями через одну свечу ----
+var bullFVG = array.new<box>(0)
+var bearFVG = array.new<box>(0)
+
+if showFVG and low > high[2]
+    b = box.new(bar_index - 1, low, bar_index, high[2], border_color = color.new(bullCol, 0), bgcolor = color.new(bullCol, 85), extend = extend.none)
+    array.push(bullFVG, b)
+    if array.size(bullFVG) > fvgMax
+        box.delete(array.shift(bullFVG))
+
+if showFVG and high < low[2]
+    b = box.new(bar_index - 1, low[2], bar_index, high, border_color = color.new(bearCol, 0), bgcolor = color.new(bearCol, 85), extend = extend.none)
+    array.push(bearFVG, b)
+    if array.size(bearFVG) > fvgMax
+        box.delete(array.shift(bearFVG))
+
+// ---- Общее сопровождение зон: растянуть до текущего бара, удалить при митигации ----
+manageZones(arr, mitigate) =>
+    n = array.size(arr)
+    if n > 0
+        for i = n - 1 to 0
+            b = array.get(arr, i)
+            top = box.get_top(b)
+            bot = box.get_bottom(b)
+            if mitigate and high >= bot and low <= top
+                box.delete(b)
+                array.remove(arr, i)
+            else
+                box.set_right(b, bar_index)
+
+manageZones(bullOB, mitigateOB)
+manageZones(bearOB, mitigateOB)
+manageZones(bullFVG, mitigateFVG)
+manageZones(bearFVG, mitigateFVG)
+
+alertcondition(isBOS_up,   "BOS вверх (бычий)",              "SMC: BOS bullish")
+alertcondition(isBOS_dn,   "BOS вниз (медвежий)",             "SMC: BOS bearish")
+alertcondition(isCHOCH_up, "CHoCH вверх (разворот в бычий)",  "SMC: CHoCH bullish")
+alertcondition(isCHOCH_dn, "CHoCH вниз (разворот в медвежий)", "SMC: CHoCH bearish")
