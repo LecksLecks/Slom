@@ -263,7 +263,10 @@ fullBody = rng > 0 and bodySz / rng >= bodyRatio
 impBody  = bodySz >= impulseATR * atr14
 
 // фильтр A (объём): свеча закрепа должна иметь объём выше SMA×множитель
-volOK    = not useVolFilter or volume >= ta.sma(volume, volLen) * volMult
+// ta.sma считаем безусловно (в глобальной переменной), иначе внутри «or» он
+// может вызываться не на каждом баре — CW10002
+volSma   = ta.sma(volume, volLen)
+volOK    = not useVolFilter or volume >= volSma * volMult
 
 holdUpC  = fullBody and (not requireDir or close > open) and volOK
 holdDnC  = fullBody and (not requireDir or close < open) and volOK
