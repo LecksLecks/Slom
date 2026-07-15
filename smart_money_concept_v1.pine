@@ -103,8 +103,32 @@ findOpposite(bullish, maxBack) =>
             break
     idx
 
-var bullOB = array.new<box>(0)
-var bearOB = array.new<box>(0)
+// ---- Общее сопровождение зон: растянуть до текущего бара, удалить при митигации ----
+// ponytail: должно идти ДО создания новых зон этого бара — иначе только что
+// созданная зона (её граница = high/low этого же бара) немедленно
+// митигируется собственным баром рождения.
+manageZones(arr, mitigate) =>
+    n = array.size(arr)
+    if n > 0
+        for i = n - 1 to 0
+            b = array.get(arr, i)
+            top = box.get_top(b)
+            bot = box.get_bottom(b)
+            if mitigate and high >= bot and low <= top
+                array.remove(arr, i)
+                box.delete(b)
+            else
+                box.set_right(b, bar_index)
+
+var bullOB  = array.new<box>(0)
+var bearOB  = array.new<box>(0)
+var bullFVG = array.new<box>(0)
+var bearFVG = array.new<box>(0)
+
+manageZones(bullOB, mitigateOB)
+manageZones(bearOB, mitigateOB)
+manageZones(bullFVG, mitigateFVG)
+manageZones(bearFVG, mitigateFVG)
 
 if showOB and bullBreak
     idx = findOpposite(true, obLookback)
@@ -123,9 +147,6 @@ if showOB and bearBreak
             box.delete(array.shift(bearOB))
 
 // ---- Fair Value Gap: разрыв между тенями через одну свечу ----
-var bullFVG = array.new<box>(0)
-var bearFVG = array.new<box>(0)
-
 if showFVG and low > high[2]
     b = box.new(bar_index - 1, low, bar_index, high[2], border_color = color.new(bullCol, 0), bgcolor = color.new(bullCol, 85), extend = extend.none)
     array.push(bullFVG, b)
@@ -137,25 +158,6 @@ if showFVG and high < low[2]
     array.push(bearFVG, b)
     if array.size(bearFVG) > fvgMax
         box.delete(array.shift(bearFVG))
-
-// ---- Общее сопровождение зон: растянуть до текущего бара, удалить при митигации ----
-manageZones(arr, mitigate) =>
-    n = array.size(arr)
-    if n > 0
-        for i = n - 1 to 0
-            b = array.get(arr, i)
-            top = box.get_top(b)
-            bot = box.get_bottom(b)
-            if mitigate and high >= bot and low <= top
-                array.remove(arr, i)
-                box.delete(b)
-            else
-                box.set_right(b, bar_index)
-
-manageZones(bullOB, mitigateOB)
-manageZones(bearOB, mitigateOB)
-manageZones(bullFVG, mitigateFVG)
-manageZones(bearFVG, mitigateFVG)
 
 alertcondition(isBOS_up,   "BOS вверх (бычий)",              "SMC: BOS bullish")
 alertcondition(isBOS_dn,   "BOS вниз (медвежий)",             "SMC: BOS bearish")
