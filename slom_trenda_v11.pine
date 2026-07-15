@@ -22,6 +22,12 @@
 //     окна UTC (уже идущую попытку сессия не прерывает)
 //   - Фильтр сжатия волатильности — новая попытка не начинается, если
 //     текущий ATR14 аномально ниже своей средней (сквиз)
+//   - Фильтр D: свип ликвидности — закреп засчитывается, только если с
+//     момента формирования зоны была тень за её экстремумом (+ буфер ATR),
+//     закрывшаяся обратно. Без этого пробои считаются даже когда уровень
+//     ни разу не был протестирован стоп-охотой — источник части fakeout'ов
+//     на бэктесте (PF 0.375). Флаг привязан к зоне, не к попытке: сбрасывается
+//     только новым пивотом того же типа.
 //   - Визуализация стоп/тейка на сломе (группа "9."): стоп за дальней
 //     границей сломанной зоны + буфер ATR, тейк по R:R — те же уровни,
 //     что использует strategy-компаньон для бэктеста
@@ -145,6 +151,9 @@ sessTime   = input.session("0800-2200", "Разрешённая сессия (UT
 useSqueezeFilter = input.bool(false, "Фильтр сжатия волатильности — не начинать пробой в сквизе", group = G6)
 atrSmaLen        = input.int(50, "Волатильность: период средней ATR", minval = 5, group = G6)
 squeezeMult      = input.float(0.7, "Сквиз, если ATR14 < × средней ATR", minval = 0.1, step = 0.05, group = G6)
+
+useSweepFilter = input.bool(false, "Требовать свип уровня (тень + ATR-буфер, закрытие обратно) до закрепа", group = G6)
+sweepATR       = input.float(0.3, "Свип: буфер за экстремумом, × ATR14", minval = 0.0, step = 0.1, group = G6)
 
 G7 = "8. MACD-дивергенция (информационно, на пивотах)"
 useDiv      = input.bool(false, "Показывать MACD-дивергенцию на пивотах", group = G7)
@@ -300,6 +309,12 @@ var box   glBox = na
 var int   ghBar = na    // фикс #6: когда появилась текущая глобальная зона сопротивления
 var int   glBar = na    // фикс #6: когда появилась текущая глобальная зона поддержки
 
+// фильтр D: был ли уровень зоны уже свипнут тенью (+ буфер ATR) с закрытием обратно
+var bool  lhSwept = false
+var bool  ghSwept = false
+var bool  llSwept = false
+var bool  glSwept = false
+
 // ПОПЫТКИ ---------------------------------------------------------------------
 var bool  aLHon = false
 var float aLHref = na
@@ -437,6 +452,7 @@ if barstate.isconfirmed
         lhTop := high[locLB]
         lhBot := math.max(open[locLB], close[locLB])
         lhBox := showLocZones ? box.new(pb, lhTop, bar_index, lhBot, border_color = color.new(bearCol, 45), bgcolor = color.new(bearCol, zoneTransp), border_width = 1) : na
+        lhSwept := false
 
     if not na(plLoc)
         pb = bar_index - locLB
@@ -460,6 +476,7 @@ if barstate.isconfirmed
         llBot := low[locLB]
         llTop := math.min(open[locLB], close[locLB])
         llBox := showLocZones ? box.new(pb, llTop, bar_index, llBot, border_color = color.new(bullCol, 45), bgcolor = color.new(bullCol, zoneTransp), border_width = 1) : na
+        llSwept := false
 
     if not na(phGlob)
         pb = bar_index - globLB
@@ -484,6 +501,7 @@ if barstate.isconfirmed
         ghBot := math.max(open[globLB], close[globLB])
         ghBox := showGlobZones ? box.new(pb, ghTop, bar_index, ghBot, border_color = color.new(bearCol, 10), bgcolor = color.new(bearCol, zoneTransp), border_width = 2) : na
         ghBar := bar_index
+        ghSwept := false
 
     if not na(plGlob)
         pb = bar_index - globLB
@@ -508,6 +526,7 @@ if barstate.isconfirmed
         glTop := math.min(open[globLB], close[globLB])
         glBox := showGlobZones ? box.new(pb, glTop, bar_index, glBot, border_color = color.new(bullCol, 10), bgcolor = color.new(bullCol, zoneTransp), border_width = 2) : na
         glBar := bar_index
+        glSwept := false
 
     if not na(lhBox)
         box.set_right(lhBox, bar_index)
@@ -517,6 +536,20 @@ if barstate.isconfirmed
         box.set_right(ghBox, bar_index)
     if not na(glBox)
         box.set_right(glBox, bar_index)
+
+    // ===== СВИП ЛИКВИДНОСТИ (фильтр D) ======================================
+    // тень пробивает экстремум зоны с ATR-буфером, но закрытие возвращается
+    // за уровень — признак снятой ликвидности перед настоящим пробоем.
+    // Флаг на зону, не на попытку: живёт, пока зону не сменит новый пивот.
+    if useSweepFilter
+        if not na(lhTop) and high >= lhTop + sweepATR * atr14 and close < lhTop
+            lhSwept := true
+        if not na(llBot) and low <= llBot - sweepATR * atr14 and close > llBot
+            llSwept := true
+        if not na(ghTop) and high >= ghTop + sweepATR * atr14 and close < ghTop
+            ghSwept := true
+        if not na(glBot) and low <= glBot - sweepATR * atr14 and close > glBot
+            glSwept := true
 
     // ===== СБРОС «УЖЕ СЛОМАН» ===============================================
     // фикс #5: сбрасываем *Far вместе с *Broken
@@ -593,7 +626,7 @@ if barstate.isconfirmed
                 aLHcnt += 1
             else if strictMode
                 aLHcnt := 0
-            if aLHcnt >= holdBars and (not needWickOK or aLHwickOK)
+            if aLHcnt >= holdBars and (not needWickOK or aLHwickOK) and (not useSweepFilter or lhSwept)
                 lhBroken := aLHref
                 lhBrokenFar := aLHfar
                 if keepBroken and not na(lhBox)
@@ -646,7 +679,7 @@ if barstate.isconfirmed
                 aLLcnt += 1
             else if strictMode
                 aLLcnt := 0
-            if aLLcnt >= holdBars and (not needWickOK or aLLwickOK)
+            if aLLcnt >= holdBars and (not needWickOK or aLLwickOK) and (not useSweepFilter or llSwept)
                 llBroken := aLLref
                 llBrokenFar := aLLfar
                 if keepBroken and not na(llBox)
@@ -699,7 +732,7 @@ if barstate.isconfirmed
                 aGHcnt += 1
             else if strictMode
                 aGHcnt := 0
-            if aGHcnt >= holdBars and (not needWickOK or aGHwickOK)
+            if aGHcnt >= holdBars and (not needWickOK or aGHwickOK) and (not useSweepFilter or ghSwept)
                 ghBroken := aGHref
                 ghBrokenFar := aGHfar
                 if keepBroken and not na(ghBox)
@@ -752,7 +785,7 @@ if barstate.isconfirmed
                 aGLcnt += 1
             else if strictMode
                 aGLcnt := 0
-            if aGLcnt >= holdBars and (not needWickOK or aGLwickOK)
+            if aGLcnt >= holdBars and (not needWickOK or aGLwickOK) and (not useSweepFilter or glSwept)
                 glBroken := aGLref
                 glBrokenFar := aGLfar
                 if keepBroken and not na(glBox)
