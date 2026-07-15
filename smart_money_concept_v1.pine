@@ -147,8 +147,8 @@ manageZones(arr, mitigate) =>
             top = box.get_top(b)
             bot = box.get_bottom(b)
             if mitigate and high >= bot and low <= top
-                box.delete(b)
                 array.remove(arr, i)
+                box.delete(b)
             else
                 box.set_right(b, bar_index)
 
