@@ -52,6 +52,16 @@
 //     был бы слишком дорог. showVpLines (группа 6) рисует POC/VA-линии на
 //     сломе. Объём бара кладётся в один бин по hlc3 — грубее настоящего
 //     профиля (нет тиковых данных на обычном фиде), но для скора достаточно.
+//   - useOiFilter: Open Interest перпетуала (нативный тикер-суффикс "_OI",
+//     ignore_invalid_symbol=true — на символах без OI просто не участвует
+//     в скоре). Рост цены/движение без роста OI — это закрытие позиций
+//     (шорт-сквиз / лонг-ликвидация), а не свежие деньги, статистически
+//     менее надёжный слом. Проверка одинакова для лок/глоб и для обеих
+//     сторон слома — OI должен расти, направление здесь не при чём.
+//     Funding rate тем же путём НЕ добавлен: единственный найденный способ
+//     идёт через библиотеку TradingView Request (cryptoDerivativeMetric),
+//     а точный номер версии для import подтвердить не удалось — гадать
+//     с импортом библиотеки рискованно уже на этапе компиляции.
 //   - Визуализация стоп/тейка на сломе (группа "9."): стоп за дальней
 //     границей сломанной зоны + буфер ATR, тейк по R:R — те же уровни,
 //     что использует strategy-компаньон для бэктеста
@@ -181,6 +191,9 @@ vpLookback  = input.int(200, "Volume Profile: окно баров", minval = 20,
 vpRows      = input.int(24, "Volume Profile: число уровней", minval = 6, maxval = 50, group = G6)
 vpVaPct     = input.float(70, "Value Area, % объёма", minval = 50, maxval = 95, group = G6)
 
+useOiFilter = input.bool(false, "Слом без роста Open Interest — снижает скор", group = G6)
+oiLookback  = input.int(5, "OI: окно сравнения, баров", minval = 1, maxval = 50, group = G6)
+
 useRetest     = input.bool(false, "Требовать ретест с отбоем перед сигналом", group = G6)
 retestATR     = input.float(1.0, "Ретест: допуск от уровня, × ATR14", minval = 0.1, step = 0.1, group = G6)
 retestWindow  = input.int(10, "Ретест: окно ожидания, баров", minval = 2, group = G6)
@@ -226,6 +239,13 @@ htfTrend   = htfEmaFast > htfEmaSlow and htfClose > htfEmaFast ? 1 : htfEmaFast 
 
 // сессионный VWAP — встроенный, сам сбрасывается на новой сессии
 vwapVal = ta.vwap
+
+// Open Interest перпетуала: нативный тикер-суффикс "_OI" (не для всех
+// символов/бирж данные есть — ignore_invalid_symbol гасит это в na,
+// а не в ошибку компиляции/рантайма)
+oiClose  = request.security(syminfo.tickerid + "_OI", timeframe.period, close[1], barmerge.gaps_off, barmerge.lookahead_off, ignore_invalid_symbol = true)
+oiRising = not na(oiClose) and not na(oiClose[oiLookback]) and oiClose > oiClose[oiLookback]
+
 plot(showEMA ? emaFast : na, "EMA 50",  color = color.new(#ffb74d, 0))
 plot(showEMA ? emaSlow : na, "EMA 200", color = color.new(#7e57c2, 0), linewidth = 2)
 
@@ -1051,8 +1071,9 @@ if barstate.isconfirmed
         vwapBad  = useVwapFilter and close < vwapVal
         avwapBad = useAvwapFilter and not na(avwapVal) and close < avwapVal
         vpBad    = useVpFilter and not na(vpVaHi) and close <= vpVaHi
-        totalChk = 1 + (useEmaFilter ? 1 : 0) + (useHtfEmaFilter ? 1 : 0) + (useVwapFilter ? 1 : 0) + (useAvwapFilter ? 1 : 0) + (useVpFilter ? 1 : 0)
-        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter ? (htfBad ? 0 : 1) : 0) + (useVwapFilter ? (vwapBad ? 0 : 1) : 0) + (useAvwapFilter ? (avwapBad ? 0 : 1) : 0) + (useVpFilter ? (vpBad ? 0 : 1) : 0)
+        oiBad    = useOiFilter and not oiRising
+        totalChk = 1 + (useEmaFilter ? 1 : 0) + (useHtfEmaFilter ? 1 : 0) + (useVwapFilter ? 1 : 0) + (useAvwapFilter ? 1 : 0) + (useVpFilter ? 1 : 0) + (useOiFilter ? 1 : 0)
+        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter ? (htfBad ? 0 : 1) : 0) + (useVwapFilter ? (vwapBad ? 0 : 1) : 0) + (useAvwapFilter ? (avwapBad ? 0 : 1) : 0) + (useVpFilter ? (vpBad ? 0 : 1) : 0) + (useOiFilter ? (oiBad ? 0 : 1) : 0)
         full     = passChk == totalChk
         if showLoc and not nearGlob and (full or showWeak)
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
@@ -1093,8 +1114,9 @@ if barstate.isconfirmed
         vwapBad  = useVwapFilter and close > vwapVal
         avwapBad = useAvwapFilter and not na(avwapVal) and close > avwapVal
         vpBad    = useVpFilter and not na(vpVaLo) and close >= vpVaLo
-        totalChk = 1 + (useEmaFilter ? 1 : 0) + (useHtfEmaFilter ? 1 : 0) + (useVwapFilter ? 1 : 0) + (useAvwapFilter ? 1 : 0) + (useVpFilter ? 1 : 0)
-        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter ? (htfBad ? 0 : 1) : 0) + (useVwapFilter ? (vwapBad ? 0 : 1) : 0) + (useAvwapFilter ? (avwapBad ? 0 : 1) : 0) + (useVpFilter ? (vpBad ? 0 : 1) : 0)
+        oiBad    = useOiFilter and not oiRising
+        totalChk = 1 + (useEmaFilter ? 1 : 0) + (useHtfEmaFilter ? 1 : 0) + (useVwapFilter ? 1 : 0) + (useAvwapFilter ? 1 : 0) + (useVpFilter ? 1 : 0) + (useOiFilter ? 1 : 0)
+        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter ? (htfBad ? 0 : 1) : 0) + (useVwapFilter ? (vwapBad ? 0 : 1) : 0) + (useAvwapFilter ? (avwapBad ? 0 : 1) : 0) + (useVpFilter ? (vpBad ? 0 : 1) : 0) + (useOiFilter ? (oiBad ? 0 : 1) : 0)
         full     = passChk == totalChk
         if showLoc and not nearGlob and (full or showWeak)
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
@@ -1137,8 +1159,9 @@ if barstate.isconfirmed
         vwapBad  = useVwapFilter and close < vwapVal
         avwapBad = useAvwapFilter and not na(avwapVal) and close < avwapVal
         vpBad    = useVpFilter and not na(vpVaHi) and close <= vpVaHi
-        totalChk = 1 + (useEmaFilter ? 1 : 0) + (useHtfEmaFilter ? 1 : 0) + (useVwapFilter ? 1 : 0) + (useAvwapFilter ? 1 : 0) + (useVpFilter ? 1 : 0)
-        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter ? (htfBad ? 0 : 1) : 0) + (useVwapFilter ? (vwapBad ? 0 : 1) : 0) + (useAvwapFilter ? (avwapBad ? 0 : 1) : 0) + (useVpFilter ? (vpBad ? 0 : 1) : 0)
+        oiBad    = useOiFilter and not oiRising
+        totalChk = 1 + (useEmaFilter ? 1 : 0) + (useHtfEmaFilter ? 1 : 0) + (useVwapFilter ? 1 : 0) + (useAvwapFilter ? 1 : 0) + (useVpFilter ? 1 : 0) + (useOiFilter ? 1 : 0)
+        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter ? (htfBad ? 0 : 1) : 0) + (useVwapFilter ? (vwapBad ? 0 : 1) : 0) + (useAvwapFilter ? (avwapBad ? 0 : 1) : 0) + (useVpFilter ? (vpBad ? 0 : 1) : 0) + (useOiFilter ? (oiBad ? 0 : 1) : 0)
         full     = passChk == totalChk
         if showGlob and (full or showWeak)
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
@@ -1179,8 +1202,9 @@ if barstate.isconfirmed
         vwapBad  = useVwapFilter and close > vwapVal
         avwapBad = useAvwapFilter and not na(avwapVal) and close > avwapVal
         vpBad    = useVpFilter and not na(vpVaLo) and close >= vpVaLo
-        totalChk = 1 + (useEmaFilter ? 1 : 0) + (useHtfEmaFilter ? 1 : 0) + (useVwapFilter ? 1 : 0) + (useAvwapFilter ? 1 : 0) + (useVpFilter ? 1 : 0)
-        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter ? (htfBad ? 0 : 1) : 0) + (useVwapFilter ? (vwapBad ? 0 : 1) : 0) + (useAvwapFilter ? (avwapBad ? 0 : 1) : 0) + (useVpFilter ? (vpBad ? 0 : 1) : 0)
+        oiBad    = useOiFilter and not oiRising
+        totalChk = 1 + (useEmaFilter ? 1 : 0) + (useHtfEmaFilter ? 1 : 0) + (useVwapFilter ? 1 : 0) + (useAvwapFilter ? 1 : 0) + (useVpFilter ? 1 : 0) + (useOiFilter ? 1 : 0)
+        passChk  = (air ? 0 : 1) + (useEmaFilter ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter ? (htfBad ? 0 : 1) : 0) + (useVwapFilter ? (vwapBad ? 0 : 1) : 0) + (useAvwapFilter ? (avwapBad ? 0 : 1) : 0) + (useVpFilter ? (vpBad ? 0 : 1) : 0) + (useOiFilter ? (oiBad ? 0 : 1) : 0)
         full     = passChk == totalChk
         if showGlob and (full or showWeak)
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
