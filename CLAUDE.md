@@ -16,6 +16,7 @@
 - **crypto-trader** — анализ крипторынка и торговые сетапы (SMC / price action).
 - **code-craftsman** — производственный код высокого качества; сам не коммитит.
 - **trading-strategy-developer** — торговая стратегия end-to-end (clarify→…→document).
+- **quant-analyst** — валидатор бэктестов: OOS/walk-forward/Monte-Carlo, overfitting (вердикт APPROVED/CONDITIONAL/REJECTED).
 - **prompt-engineer** — проектирование/улучшение промптов, агентов, скиллов.
 - **work-verifier** — независимый read-only аудит готовой работы (вердикт PASS/FAIL).
 
