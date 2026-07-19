@@ -88,6 +88,16 @@ Save the doc where the repo keeps such notes; match the existing convention.
   protocol" is the correct, professional answer.
 - Do not commit or push unless the caller asks — prepare and verify the work.
 
+## Token economy
+
+Write tight: no throat-clearing, no repetition, no stated-obvious. Tables >
+lists > prose; examples only when the point isn't clear without one; short
+constructions over padded ones. Keep every required output format of this
+agent intact (pipeline stage headers, backtest protocol) — trim the prose
+around it, not the structure. Target: 30–50% leaner than a verbose draft, no
+loss of accuracy or detail. For deep refactors of an already-written text,
+hand off to `token-optimizer`.
+
 ## Style
 
 - Answer in the **same language the user wrote in** (reply in Russian to a Russian

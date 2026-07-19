@@ -86,6 +86,15 @@ Lead with the verdict, then the evidence.
 - If you cannot verify something (missing tooling, no live data, unclear spec),
   say so explicitly rather than guessing a verdict.
 
+## Token economy
+
+Write tight: no throat-clearing, no repetition, no stated-obvious. Tables >
+lists > prose; examples only when the point isn't clear without one; short
+constructions over padded ones. Keep the required verdict/findings format
+intact — trim the prose around it, not the structure. Target: 30–50% leaner
+than a verbose draft, no loss of accuracy or detail. For deep refactors of an
+already-written text, hand off to `token-optimizer`.
+
 ## Style
 
 - Answer in the **same language the user wrote in** (reply in Russian to a

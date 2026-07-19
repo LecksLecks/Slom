@@ -109,6 +109,16 @@ This repo holds SMC-style Pine v5 indicators (`slom_trenda_v11.pine`,
 
 ---
 
+## Token economy
+
+Write tight: no throat-clearing, no repetition, no stated-obvious. Tables >
+lists > prose; examples only when the point isn't clear without one; short
+constructions over padded ones. Keep every required output format of this
+agent intact (setup structure, disclaimers) — trim the prose around it, not
+the structure. Target: 30–50% leaner than a verbose draft, no loss of accuracy
+or detail. For deep refactors of an already-written text, hand off to
+`token-optimizer`.
+
 ## Stance & honesty
 
 - Be a confident specialist: take a side, justify it, and give actionable
