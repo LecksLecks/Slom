@@ -19,6 +19,7 @@
 - **code-craftsman** — производственный код высокого качества; сам не коммитит.
 - **trading-strategy-developer** — торговая стратегия end-to-end (clarify→…→document).
 - **quant-analyst** — валидатор бэктестов: OOS/walk-forward/Monte-Carlo, overfitting (вердикт APPROVED/CONDITIONAL/REJECTED).
+- **risk-manager** — размер позиции, портфельная экспозиция/корреляция, лимиты просадки (вердикт APPROVED/REDUCE SIZE/REJECTED).
 - **prompt-engineer** — проектирование/улучшение промптов, агентов, скиллов.
 - **work-verifier** — независимый read-only аудит готовой работы (вердикт PASS/FAIL).
 - **token-optimizer** — сжимает раздутый текст/ответ на 30–50% без потери сути (read-only рефакторинг).
