@@ -52,7 +52,7 @@ model: sonnet
 
 ## Важно для этого репо
 Экономь **прозу**, но сохраняй **заданный агенту формат вывода** — карточки
-вердиктов (quant-analyst, onchain-sentiment-analyst, agent-router), обязательные
+вердиктов (quant-analyst, onchain-sentiment-analyst, risk-manager), обязательные
 таблицы, дисклеймеры. Экономия ≠ выкидывание требуемой структуры.
 
 ## Стиль
