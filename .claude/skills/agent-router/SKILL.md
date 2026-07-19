@@ -27,7 +27,9 @@ disable-model-invocation: true
 - **trading-strategy-developer** — стратегия end-to-end (clarify→research→plan→code→backtest→document), перевод индикатора в `strategy()`.
   *Триггеры:* «создай стратегию», «сделай индикатор/сигнал», «Pine Script», «скринер», «бэктест-протокол».
 
-### Валидация и риск
+### Данные, валидация и риск
+- **data-engineer** — добыть/очистить/провалидировать историческую серию (OHLCV, funding, OI) в датасет для бэктеста; point-in-time целостность, никогда не выдумывает пропуски.
+  *Триггеры:* «дай исторические данные», «данные для бэктеста», «почисти датасет», «проверь данные на пропуски».
 - **quant-analyst** — валидация бэктестов: IS/OOS, walk-forward, Monte-Carlo, overfitting, Sharpe/DD (вердикт APPROVED/CONDITIONAL/REJECTED).
   *Триггеры:* «проверь стратегию», «валидация бэктеста», «overfitting», «Sharpe», «walk-forward».
 - **risk-manager** — размер позиции, портфельная экспозиция/корреляция, лимиты потерь, бюджет просадки (вердикт APPROVED/REDUCE SIZE/REJECTED).

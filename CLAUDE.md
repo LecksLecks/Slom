@@ -23,6 +23,7 @@
 - **code-craftsman** — производственный код высокого качества; сам не коммитит.
 - **bug-diagnostician** — систематическая диагностика трудных багов и регрессий (петля → репродукция → гипотезы → фикс+регрессионный тест); сам не коммитит.
 - **trading-strategy-developer** — торговая стратегия end-to-end (clarify→…→document).
+- **data-engineer** — добывает/чистит/валидирует данные (OHLCV, funding, OI) в датасет для бэктеста; сам не коммитит.
 - **quant-analyst** — валидатор бэктестов: OOS/walk-forward/Monte-Carlo, overfitting (вердикт APPROVED/CONDITIONAL/REJECTED).
 - **risk-manager** — размер позиции, портфельная экспозиция/корреляция, лимиты просадки (вердикт APPROVED/REDUCE SIZE/REJECTED).
 - **prompt-engineer** — проектирование/улучшение промптов, агентов, скиллов.
