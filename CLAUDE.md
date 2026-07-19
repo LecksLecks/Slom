@@ -21,6 +21,7 @@
 - **crypto-trader** — анализ крипторынка и торговые сетапы (SMC / price action).
 - **onchain-sentiment-analyst** — фундаментал крипты: on-chain + сентимент + токеномика (вердикт BULLISH/BEARISH/NEUTRAL, без прогноза цены).
 - **code-craftsman** — производственный код высокого качества; сам не коммитит.
+- **bug-diagnostician** — систематическая диагностика трудных багов и регрессий (петля → репродукция → гипотезы → фикс+регрессионный тест); сам не коммитит.
 - **trading-strategy-developer** — торговая стратегия end-to-end (clarify→…→document).
 - **quant-analyst** — валидатор бэктестов: OOS/walk-forward/Monte-Carlo, overfitting (вердикт APPROVED/CONDITIONAL/REJECTED).
 - **risk-manager** — размер позиции, портфельная экспозиция/корреляция, лимиты просадки (вердикт APPROVED/REDUCE SIZE/REJECTED).
