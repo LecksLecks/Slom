@@ -14,6 +14,7 @@
 - **task-coordinator** — точка входа: декомпозиция и маршрутизация задач (read-only).
 - **web-search** — поиск актуальных/внешних фактов с цитированием (read-only).
 - **crypto-trader** — анализ крипторынка и торговые сетапы (SMC / price action).
+- **onchain-sentiment-analyst** — фундаментал крипты: on-chain + сентимент + токеномика (вердикт BULLISH/BEARISH/NEUTRAL, без прогноза цены).
 - **code-craftsman** — производственный код высокого качества; сам не коммитит.
 - **trading-strategy-developer** — торговая стратегия end-to-end (clarify→…→document).
 - **quant-analyst** — валидатор бэктестов: OOS/walk-forward/Monte-Carlo, overfitting (вердикт APPROVED/CONDITIONAL/REJECTED).
