@@ -1,6 +1,7 @@
 {
   "enabledPlugins": {
     "ui-ux-pro-max@ui-ux-pro-max-skill": true,
-    "superpowers@superpowers-dev": true
+    "superpowers@superpowers-dev": true,
+    "context7@context7-marketplace": true
   }
 }
