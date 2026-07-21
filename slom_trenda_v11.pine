@@ -153,7 +153,9 @@ holdDnC  = fullBody and (not requireDir or close < open) and volOK
 impUpC   = useImpulse and impBody and close > open and volOK
 impDnC   = useImpulse and impBody and close < open and volOK
 
-sessOK = not useSession or not na(time(timeframe.period, sessTime, "UTC"))
+// БАГФИКС: time() с сессией вне интрадея всегда возвращает na — без этой
+// защиты включённый фильтр молча блокирует ВСЕ новые попытки на D/W/M
+sessOK = not useSession or not timeframe.isintraday or not na(time(timeframe.period, sessTime, "UTC"))
 
 atrSMA    = ta.sma(atr14, atrSmaLen)
 squeezeOK = not useSqueezeFilter or atr14 >= atrSMA * squeezeMult
@@ -205,6 +207,13 @@ removeSig(label lb) =>
     idx = array.indexof(keptSig, lb)
     if idx >= 0
         array.remove(keptSig, idx)
+
+// БАГФИКС: дубль ЛОК/ГЛОБ вычищает и dotted-линию локального сигнала,
+// поэтому её тоже нужно уметь убирать из кольцевого буфера перед удалением
+removeLocLine(line l) =>
+    idx = array.indexof(keptLocLines, l)
+    if idx >= 0
+        array.remove(keptLocLines, idx)
 
 pushSweep(label lb) =>
     array.push(keptSweep, lb)
@@ -365,6 +374,10 @@ var label locLblUp = na
 var int   locLblUpBar = na
 var label locLblDn = na
 var int   locLblDnBar = na
+// БАГФИКС: dotted-линия локального сигнала отслеживается так же, как метка,
+// чтобы глобальный дубль убирал их вместе
+var line  locLineUp = na
+var line  locLineDn = na
 
 var int nStarted    = 0
 var int nFailBack   = 0
@@ -660,13 +673,17 @@ if barstate.isconfirmed
                     box.delete(lhBox)
                     lhBox := na
                 if useRetest
-                    if not rtLHon
-                        rtLHon := true
-                        rtLHlvl := aLHref
-                        rtLHbar := bar_index
-                        rtLHstb := aLHbar
-                        rtLHtouched := false
-                        rtLHfar := aLHfar
+                    // БАГФИКС: старый висящий ретест того же типа, перезаписанный
+                    // новым закрепом, засчитывается как неподтверждённый, а не
+                    // теряется молча (раньше не переармировался и терял новое событие)
+                    if rtLHon
+                        nRetestFail += 1
+                    rtLHon := true
+                    rtLHlvl := aLHref
+                    rtLHbar := bar_index
+                    rtLHstb := aLHbar
+                    rtLHtouched := false
+                    rtLHfar := aLHfar
                 else
                     sigLocUp := true
                     sLvlLocUp := aLHref
@@ -722,13 +739,14 @@ if barstate.isconfirmed
                     box.delete(llBox)
                     llBox := na
                 if useRetest
-                    if not rtLLon
-                        rtLLon := true
-                        rtLLlvl := aLLref
-                        rtLLbar := bar_index
-                        rtLLstb := aLLbar
-                        rtLLtouched := false
-                        rtLLfar := aLLfar
+                    if rtLLon
+                        nRetestFail += 1
+                    rtLLon := true
+                    rtLLlvl := aLLref
+                    rtLLbar := bar_index
+                    rtLLstb := aLLbar
+                    rtLLtouched := false
+                    rtLLfar := aLLfar
                 else
                     sigLocDn := true
                     sLvlLocDn := aLLref
@@ -784,13 +802,14 @@ if barstate.isconfirmed
                     box.delete(ghBox)
                     ghBox := na
                 if useRetest
-                    if not rtGHon
-                        rtGHon := true
-                        rtGHlvl := aGHref
-                        rtGHbar := bar_index
-                        rtGHstb := aGHbar
-                        rtGHtouched := false
-                        rtGHfar := aGHfar
+                    if rtGHon
+                        nRetestFail += 1
+                    rtGHon := true
+                    rtGHlvl := aGHref
+                    rtGHbar := bar_index
+                    rtGHstb := aGHbar
+                    rtGHtouched := false
+                    rtGHfar := aGHfar
                 else
                     sigGlobUp := true
                     sLvlGlobUp := aGHref
@@ -846,13 +865,14 @@ if barstate.isconfirmed
                     box.delete(glBox)
                     glBox := na
                 if useRetest
-                    if not rtGLon
-                        rtGLon := true
-                        rtGLlvl := aGLref
-                        rtGLbar := bar_index
-                        rtGLstb := aGLbar
-                        rtGLtouched := false
-                        rtGLfar := aGLfar
+                    if rtGLon
+                        nRetestFail += 1
+                    rtGLon := true
+                    rtGLlvl := aGLref
+                    rtGLbar := bar_index
+                    rtGLstb := aGLbar
+                    rtGLtouched := false
+                    rtGLfar := aGLfar
                 else
                     sigGlobDn := true
                     sLvlGlobDn := aGLref
@@ -939,7 +959,14 @@ if barstate.isconfirmed
         locLastLvl := lvl
         gRef = zGH
         nearGlob = not na(gRef) and math.abs(lvl - gRef) <= dupATR * atr14 and not na(ghBar) and (bar_index - ghBar <= dupWindow)
-        [vpPoc, vpVaLo, vpVaHi] = computeVA(vpLookback, vpRows, vpVaPct)
+        float vpPoc = na
+        float vpVaLo = na
+        float vpVaHi = na
+        if useVpFilter or showVpLines
+            [vaP, vaLo, vaHi] = computeVA(vpLookback, vpRows, vpVaPct)
+            vpPoc := vaP
+            vpVaLo := vaLo
+            vpVaHi := vaHi
         emaBad   = useEmaFilter and emaTrend == -1
         htfBad   = useHtfEmaFilter and htfTrend == -1
         vwapBad  = useVwapFilter and not na(vwapVal) and close < vwapVal
@@ -958,7 +985,11 @@ if barstate.isconfirmed
             locLblUp := lb
             locLblUpBar := bar_index
             if showBrokenRef
-                pushLocLine(line.new(stb, lvl, bar_index, lvl, color = color.new(bullCol, 30), style = line.style_dotted, width = 1))
+                ln = line.new(stb, lvl, bar_index, lvl, color = color.new(bullCol, 30), style = line.style_dotted, width = 1)
+                pushLocLine(ln)
+                locLineUp := ln
+            else
+                locLineUp := na
             if showVpLines and not na(vpPoc)
                 pushLocLine(line.new(bar_index - vpLookback, vpPoc, bar_index, vpPoc, color = color.new(color.yellow, 20), width = 1))
                 pushLocLine(line.new(bar_index - vpLookback, vpVaHi, bar_index, vpVaHi, color = color.new(color.yellow, 60), style = line.style_dotted, width = 1))
@@ -983,7 +1014,14 @@ if barstate.isconfirmed
         locLastLvl := lvl
         gRef = zGL
         nearGlob = not na(gRef) and math.abs(lvl - gRef) <= dupATR * atr14 and not na(glBar) and (bar_index - glBar <= dupWindow)
-        [vpPoc, vpVaLo, vpVaHi] = computeVA(vpLookback, vpRows, vpVaPct)
+        float vpPoc = na
+        float vpVaLo = na
+        float vpVaHi = na
+        if useVpFilter or showVpLines
+            [vaP, vaLo, vaHi] = computeVA(vpLookback, vpRows, vpVaPct)
+            vpPoc := vaP
+            vpVaLo := vaLo
+            vpVaHi := vaHi
         emaBad   = useEmaFilter and emaTrend == 1
         htfBad   = useHtfEmaFilter and htfTrend == 1
         vwapBad  = useVwapFilter and not na(vwapVal) and close > vwapVal
@@ -1002,7 +1040,11 @@ if barstate.isconfirmed
             locLblDn := lb
             locLblDnBar := bar_index
             if showBrokenRef
-                pushLocLine(line.new(stb, lvl, bar_index, lvl, color = color.new(bearCol, 30), style = line.style_dotted, width = 1))
+                ln = line.new(stb, lvl, bar_index, lvl, color = color.new(bearCol, 30), style = line.style_dotted, width = 1)
+                pushLocLine(ln)
+                locLineDn := ln
+            else
+                locLineDn := na
             if showVpLines and not na(vpPoc)
                 pushLocLine(line.new(bar_index - vpLookback, vpPoc, bar_index, vpPoc, color = color.new(color.yellow, 20), width = 1))
                 pushLocLine(line.new(bar_index - vpLookback, vpVaHi, bar_index, vpVaHi, color = color.new(color.yellow, 60), style = line.style_dotted, width = 1))
@@ -1029,7 +1071,18 @@ if barstate.isconfirmed
             removeSig(locLblUp)
             label.delete(locLblUp)
             locLblUp := na
-        [vpPoc, vpVaLo, vpVaHi] = computeVA(vpLookback, vpRows, vpVaPct)
+            if not na(locLineUp)
+                removeLocLine(locLineUp)
+                line.delete(locLineUp)
+                locLineUp := na
+        float vpPoc = na
+        float vpVaLo = na
+        float vpVaHi = na
+        if useVpFilter or showVpLines
+            [vaP, vaLo, vaHi] = computeVA(vpLookback, vpRows, vpVaPct)
+            vpPoc := vaP
+            vpVaLo := vaLo
+            vpVaHi := vaHi
         emaBad   = useEmaFilter and emaTrend == -1
         htfBad   = useHtfEmaFilter and htfTrend == -1
         vwapBad  = useVwapFilter and not na(vwapVal) and close < vwapVal
@@ -1073,7 +1126,18 @@ if barstate.isconfirmed
             removeSig(locLblDn)
             label.delete(locLblDn)
             locLblDn := na
-        [vpPoc, vpVaLo, vpVaHi] = computeVA(vpLookback, vpRows, vpVaPct)
+            if not na(locLineDn)
+                removeLocLine(locLineDn)
+                line.delete(locLineDn)
+                locLineDn := na
+        float vpPoc = na
+        float vpVaLo = na
+        float vpVaHi = na
+        if useVpFilter or showVpLines
+            [vaP, vaLo, vaHi] = computeVA(vpLookback, vpRows, vpVaPct)
+            vpPoc := vaP
+            vpVaLo := vaLo
+            vpVaHi := vaHi
         emaBad   = useEmaFilter and emaTrend == 1
         htfBad   = useHtfEmaFilter and htfTrend == 1
         vwapBad  = useVwapFilter and not na(vwapVal) and close > vwapVal
