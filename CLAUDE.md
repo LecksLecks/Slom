@@ -15,6 +15,17 @@
 
 Типовой конвейер: **research → build → verify**.
 
+## Установка стороннего кода
+
+**Перед любой установкой стороннего скилла/плагина/marketplace/MCP-сервера**
+(`claude plugin install`, `npx skills add`, `claude plugin marketplace add` и
+т.п.) — прогнать через скилл `skill-security-review`
+(`.claude/skills/skill-security-review/`, вызывается через `Skill`, тоже
+`disable-model-invocation: true`, триггер — это правило, не автосрабатывание).
+Реальный код напрямую, все бандлы, а не только заявленный, опасные паттерны в
+контексте, раскрытие расхождений пользователю обязательно вне зависимости от
+вердикта.
+
 ## Агенты (subagents в `.claude/agents/`)
 
 Threads/Instagram-агенты (threads-content-manager, ig-*, reels-editor) перенесены
