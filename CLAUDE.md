@@ -33,6 +33,7 @@ Threads/Instagram-агенты (threads-content-manager, ig-*, reels-editor) п�
 
 ### Трейдинг и крипто
 - **crypto-trader** — анализ крипторынка и торговые сетапы (SMC / price action).
+- **order-flow-analyst** — микроструктура рынка: CVD, footprint, volume profile, funding/OI/basis, риск ликвидационных каскадов; фидит сигналы в crypto-trader, сам сетапы не даёт.
 - **trading-strategy-developer** — торговая стратегия end-to-end (clarify→…→document).
 - **onchain-sentiment-analyst** — фундаментал крипты: on-chain + сентимент + токеномика (вердикт BULLISH/BEARISH/NEUTRAL, без прогноза цены).
 - **quant-analyst** — валидатор бэктестов: OOS/walk-forward/Monte-Carlo, overfitting (вердикт APPROVED/CONDITIONAL/REJECTED).
