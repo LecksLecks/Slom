@@ -49,7 +49,7 @@ showFailed    = input.bool(false, "Сгоревшие попытки закре�
 showEarly     = input.bool(false, "Ранний слом — метка на неподтверждённой попытке (не сигнал)", group = G4)
 showVpLines   = input.bool(false, "Показывать POC/Value Area на сломе", group = G4)
 showSweep     = input.bool(true,  "Метка свипа на зоне (виден только если useSweepFilter включён)", group = G4)
-gateSignalsByScore = input.bool(true, "Алерты/стратегия — только полный скор (n/m = 100%, без дублей)", group = G4, tooltip = "ВЫКЛ: алерт срабатывает на любой подтверждённый слом (метка слабого при этом скрыта, если «Показывать слабые сигналы» выключен). ВКЛ (по умолчанию): emit-сигнал отдаётся ТОЛЬКО при полном скоре (full). Локальный вдобавок гасится, если дублирует свежую глобальную зону (nearGlob) ИЛИ в том же баре эмитится глобальный той же стороны (глоб старше по рангу). Метка локального дополнительно убирается задним числом, если эмитящийся глобальный пришёл в пределах dupWindow баров после неё — уже ушедший локальный алерт при этом отозвать нельзя. Включай для стратегии/бэктеста, иначе фильтры на входы не влияют.")
+gateSignalsByScore = input.bool(true, "Алерты/стратегия — только полный скор (n/m = 100%, без дублей)", group = G4, tooltip = "ВКЛ (по умолчанию): emit-сигнал отдаётся ТОЛЬКО при полном скоре (full); локальный вдобавок гасится, если дублирует свежую глобальную зону (nearGlob). ВЫКЛ: алерт срабатывает на любой подтверждённый слом — но метка при этом может отсутствовать: слабые скрыты без «Показывать слабые сигналы», а nearGlob-дубль не рисуется вовсе. В ОБОИХ режимах эмитящийся глобальный старше по рангу: он гасит локальный алерт того же бара и задним числом убирает локальную метку/стоп-тейк в пределах dupWindow баров — уже ушедший локальный алерт при этом отозвать нельзя. Включай для стратегии/бэктеста, иначе фильтры на входы не влияют.")
 showVwap      = input.bool(false, "VWAP (линия)", group = G4)
 showAvwap     = input.bool(false, "Anchored VWAP (линия)", group = G4)
 showHtfEma    = input.bool(false, "EMA 50/200 старшего TF (линии)", group = G4)
@@ -229,6 +229,20 @@ removeLocLine(line l) =>
     idx = array.indexof(keptLocLines, l)
     if idx >= 0
         array.remove(keptLocLines, idx)
+
+// БАГФИКС: бокс погибшей (не сломанной) попытки надо уметь ИЗЪЯТЬ из
+// архивного буфера, а не только удалить с графика — иначе при
+// keepBroken=ВЫКЛ непробитые зоны копятся на графике, а при ВКЛ буфер
+// «пробитых зон» засоряется непробитыми и вытесняет настоящие
+removeLocBox(box b) =>
+    idx = array.indexof(keptLocBoxes, b)
+    if idx >= 0
+        array.remove(keptLocBoxes, idx)
+
+removeGlobBox(box b) =>
+    idx = array.indexof(keptGlobBoxes, b)
+    if idx >= 0
+        array.remove(keptGlobBoxes, idx)
 
 // БАГФИКС: та же чистка нужна и для VP-линий (showVpLines), и для линий/метки
 // стоп-тейка (showStopTake) локального сигнала — раньше при дедупе
@@ -545,14 +559,12 @@ if barstate.isconfirmed
 
         // БАГФИКС: судьба старого бокса при новом пивоте — бокс живой попытки
         // уходит в архивный буфер (aLHarch помечает, что при закрепе повторно
-        // пушить не нужно); бокс при ожидающем ретесте — тоже в архив; прочие
-        // удаляются, чтобы не утекать в лимит рисования
+        // пушить не нужно); прочие удаляются: superseded-зона без попытки не
+        // «пробита» и в архиве пробитых ей делать нечего
         if not na(lhBox)
             if aLHon and aLHzbar == lhZoneBar
                 pushLocBox(lhBox)
                 aLHarch := true
-            else if rtLHon
-                pushLocBox(lhBox)
             else
                 box.delete(lhBox)
         lhTop := high[locLB]
@@ -578,8 +590,6 @@ if barstate.isconfirmed
             if aLLon and aLLzbar == llZoneBar
                 pushLocBox(llBox)
                 aLLarch := true
-            else if rtLLon
-                pushLocBox(llBox)
             else
                 box.delete(llBox)
         llBot := low[locLB]
@@ -605,8 +615,6 @@ if barstate.isconfirmed
             if aGHon and aGHzbar == ghBar
                 pushGlobBox(ghBox)
                 aGHarch := true
-            else if rtGHon
-                pushGlobBox(ghBox)
             else
                 box.delete(ghBox)
         ghTop := high[globLB]
@@ -632,8 +640,6 @@ if barstate.isconfirmed
             if aGLon and aGLzbar == glBar
                 pushGlobBox(glBox)
                 aGLarch := true
-            else if rtGLon
-                pushGlobBox(glBox)
             else
                 box.delete(glBox)
         glBot := low[globLB]
@@ -706,29 +712,42 @@ if barstate.isconfirmed
     zGL = strictRef ? glBot : glTop
 
     // ===== ПЕРЕПРИВЯЗКА ======================================================
-    // (aXXbox при гибели попытки только очищается: сам бокс либо остаётся текущей
-    // зоной, либо уже лежит в архивном буфере — обработчик пивота разрулил)
+    // БАГФИКС: погибшая (не сломанная) попытка забирает свой бокс С СОБОЙ —
+    // изъятие из архивного буфера + удаление с графика; бокс, оставшийся
+    // текущей зоной (arch=false), не трогаем — он живёт как обычная зона
     if aLHon and not na(zLH) and zLH > aLHref
         aLHon := false
         aLHcnt := 0
+        if aLHarch and not na(aLHbox)
+            removeLocBox(aLHbox)
+            box.delete(aLHbox)
         aLHbox := na
         aLHarch := false
         nRebind += 1
     if aGHon and not na(zGH) and zGH > aGHref
         aGHon := false
         aGHcnt := 0
+        if aGHarch and not na(aGHbox)
+            removeGlobBox(aGHbox)
+            box.delete(aGHbox)
         aGHbox := na
         aGHarch := false
         nRebind += 1
     if aLLon and not na(zLL) and zLL < aLLref
         aLLon := false
         aLLcnt := 0
+        if aLLarch and not na(aLLbox)
+            removeLocBox(aLLbox)
+            box.delete(aLLbox)
         aLLbox := na
         aLLarch := false
         nRebind += 1
     if aGLon and not na(zGL) and zGL < aGLref
         aGLon := false
         aGLcnt := 0
+        if aGLarch and not na(aGLbox)
+            removeGlobBox(aGLbox)
+            box.delete(aGLbox)
         aGLbox := na
         aGLarch := false
         nRebind += 1
@@ -829,6 +848,10 @@ if barstate.isconfirmed
                     if not aLHarch
                         pushLocBox(aLHbox)
                 else if not keepBroken and not na(aLHbox)
+                    // если бокс уже в буфере (положен обработчиком пивота) —
+                    // изъять, чтобы слот не тратился на мёртвый id
+                    if aLHarch
+                        removeLocBox(aLHbox)
                     box.delete(aLHbox)
                 // БАГФИКС: зона сломана — lhBox перестаёт отслеживаться (иначе
                 // «пробитая» зона тянется вправо и удаляется следующим пивотом),
@@ -861,6 +884,9 @@ if barstate.isconfirmed
                 nFailWindow += 1
                 aLHon := false
                 aLHcnt := 0
+                if aLHarch and not na(aLHbox)
+                    removeLocBox(aLHbox)
+                    box.delete(aLHbox)
                 aLHbox := na
                 aLHarch := false
         else
@@ -869,6 +895,9 @@ if barstate.isconfirmed
                 nFailBack += 1
             aLHon := false
             aLHcnt := 0
+            if aLHarch and not na(aLHbox)
+                removeLocBox(aLHbox)
+                box.delete(aLHbox)
             aLHbox := na
             aLHarch := false
     if showEarly
@@ -908,6 +937,8 @@ if barstate.isconfirmed
                     if not aLLarch
                         pushLocBox(aLLbox)
                 else if not keepBroken and not na(aLLbox)
+                    if aLLarch
+                        removeLocBox(aLLbox)
                     box.delete(aLLbox)
                 if aLLzbar == llZoneBar
                     llBox := na
@@ -934,6 +965,9 @@ if barstate.isconfirmed
                 nFailWindow += 1
                 aLLon := false
                 aLLcnt := 0
+                if aLLarch and not na(aLLbox)
+                    removeLocBox(aLLbox)
+                    box.delete(aLLbox)
                 aLLbox := na
                 aLLarch := false
         else
@@ -942,6 +976,9 @@ if barstate.isconfirmed
                 nFailBack += 1
             aLLon := false
             aLLcnt := 0
+            if aLLarch and not na(aLLbox)
+                removeLocBox(aLLbox)
+                box.delete(aLLbox)
             aLLbox := na
             aLLarch := false
     if showEarly
@@ -981,6 +1018,8 @@ if barstate.isconfirmed
                     if not aGHarch
                         pushGlobBox(aGHbox)
                 else if not keepBroken and not na(aGHbox)
+                    if aGHarch
+                        removeGlobBox(aGHbox)
                     box.delete(aGHbox)
                 if aGHzbar == ghBar
                     ghBox := na
@@ -1007,6 +1046,9 @@ if barstate.isconfirmed
                 nFailWindow += 1
                 aGHon := false
                 aGHcnt := 0
+                if aGHarch and not na(aGHbox)
+                    removeGlobBox(aGHbox)
+                    box.delete(aGHbox)
                 aGHbox := na
                 aGHarch := false
         else
@@ -1015,6 +1057,9 @@ if barstate.isconfirmed
                 nFailBack += 1
             aGHon := false
             aGHcnt := 0
+            if aGHarch and not na(aGHbox)
+                removeGlobBox(aGHbox)
+                box.delete(aGHbox)
             aGHbox := na
             aGHarch := false
     if showEarly
@@ -1054,6 +1099,8 @@ if barstate.isconfirmed
                     if not aGLarch
                         pushGlobBox(aGLbox)
                 else if not keepBroken and not na(aGLbox)
+                    if aGLarch
+                        removeGlobBox(aGLbox)
                     box.delete(aGLbox)
                 if aGLzbar == glBar
                     glBox := na
@@ -1080,6 +1127,9 @@ if barstate.isconfirmed
                 nFailWindow += 1
                 aGLon := false
                 aGLcnt := 0
+                if aGLarch and not na(aGLbox)
+                    removeGlobBox(aGLbox)
+                    box.delete(aGLbox)
                 aGLbox := na
                 aGLarch := false
         else
@@ -1088,6 +1138,9 @@ if barstate.isconfirmed
                 nFailBack += 1
             aGLon := false
             aGLcnt := 0
+            if aGLarch and not na(aGLbox)
+                removeGlobBox(aGLbox)
+                box.delete(aGLbox)
             aGLbox := na
             aGLarch := false
     if showEarly
@@ -1175,6 +1228,9 @@ if barstate.isconfirmed
                 locStopUp := stLn
                 locTakeUp := tkLn
                 locTakeLblUp := tkLbl
+                // штамп группы сигнала: даже при showLoc=ВЫКЛ (метки нет)
+                // дедуп глобальным должен уметь снять эти стоп/тейк-объекты
+                locLblUpBar := bar_index
 
     if sigLocDn
         nLocSlom += 1
@@ -1253,6 +1309,7 @@ if barstate.isconfirmed
                 locStopDn := stLn
                 locTakeDn := tkLn
                 locTakeLblDn := tkLbl
+                locLblDnBar := bar_index
 
     if sigGlobUp
         nGlobSlom += 1
@@ -1288,10 +1345,11 @@ if barstate.isconfirmed
         // БАГФИКС: дедуп локального — только если глобальный реально эмитится;
         // раньше слабый глобальный (сам не показан и не эмитится) удалял
         // полноскоровую локальную метку и гасил её алерт — сигнал исчезал целиком
-        if emitGlobUp and not na(locLblUp) and not na(locLblUpBar) and bar_index - locLblUpBar <= dupWindow
-            removeSig(locLblUp)
-            label.delete(locLblUp)
-            locLblUp := na
+        if emitGlobUp and not na(locLblUpBar) and bar_index - locLblUpBar <= dupWindow
+            if not na(locLblUp)
+                removeSig(locLblUp)
+                label.delete(locLblUp)
+                locLblUp := na
             if not na(locLineUp)
                 removeLocLine(locLineUp)
                 line.delete(locLineUp)
@@ -1371,10 +1429,11 @@ if barstate.isconfirmed
         passChk  = (air ? 0 : 1) + (useEmaFilter and emaDataOK ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter and htfDataOK ? (htfBad ? 0 : 1) : 0) + (useVwapFilter and vwapDataOK ? (vwapBad ? 0 : 1) : 0) + (useAvwapFilter and avwapDataOK ? (avwapBad ? 0 : 1) : 0) + (useVpFilter and vpDataOK ? (vpBad ? 0 : 1) : 0) + (useOiFilter and oiDataOK ? (oiBad ? 0 : 1) : 0)
         full     = passChk == totalChk
         emitGlobDn := not gateSignalsByScore or full
-        if emitGlobDn and not na(locLblDn) and not na(locLblDnBar) and bar_index - locLblDnBar <= dupWindow
-            removeSig(locLblDn)
-            label.delete(locLblDn)
-            locLblDn := na
+        if emitGlobDn and not na(locLblDnBar) and bar_index - locLblDnBar <= dupWindow
+            if not na(locLblDn)
+                removeSig(locLblDn)
+                label.delete(locLblDn)
+                locLblDn := na
             if not na(locLineDn)
                 removeLocLine(locLineDn)
                 line.delete(locLineDn)
