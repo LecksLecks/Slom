@@ -7,8 +7,8 @@ strategy("Слом тренда v11 — стратегия", "СЛОМ v11 [S]",
 
 // ─────────────────────────────────────────────────────────────────────────────
 G1 = "1. Структура (1H)"
-locLB  = input.int(5,  "Локальный хай/лой: lookback", minval = 2, group = G1)
-globLB = input.int(20, "Глобальный хай/лой: lookback", minval = 3, maxval = 490, group = G1, tooltip = "Ограничено max_bars_back (500) — цикл AVWAP-анкора «Глобальный экстремум» обращается на globLB баров назад.")
+locLB  = input.int(5,  "Локальный хай/лой: lookback", minval = 2, maxval = 100, group = G1)
+globLB = input.int(20, "Глобальный хай/лой: lookback", minval = 3, maxval = 240, group = G1, tooltip = "Ограничено буфером истории (max_bars_back=500): подтверждение пивота ta.pivothigh/low(globLB, globLB) обращается примерно на 2×lookback баров назад, поэтому потолок ~240, а не 500.")
 
 G0 = "2. Экстремумы"
 showLocExt  = input.bool(true,  "Локальные экстремумы (HH/HL/LH/LL)", group = G0)
@@ -49,7 +49,7 @@ showFailed    = input.bool(false, "Сгоревшие попытки закре�
 showEarly     = input.bool(false, "Ранний слом — метка на неподтверждённой попытке (не сигнал)", group = G4)
 showVpLines   = input.bool(false, "Показывать POC/Value Area на сломе", group = G4)
 showSweep     = input.bool(true,  "Метка свипа на зоне (виден только если useSweepFilter включён)", group = G4)
-gateSignalsByScore = input.bool(true, "Алерты/стратегия — только полный скор (n/m = 100%, без дублей)", group = G4, tooltip = "ВЫКЛ: алерт срабатывает на любой подтверждённый слом, скор-фильтры влияют только на вид метки. ВКЛ (по умолчанию): emit-сигнал отдаётся ТОЛЬКО при полном скоре (full). Локальный вдобавок гасится, если дублирует свежую глобальную зону (nearGlob) ИЛИ глобальный сигнал той же стороны появился не позже dupWindow баров назад (глоб старше по рангу). Глобальный — только по full. Включай для стратегии/бэктеста, иначе фильтры на входы не влияют.")
+gateSignalsByScore = input.bool(true, "Алерты/стратегия — только полный скор (n/m = 100%, без дублей)", group = G4, tooltip = "ВЫКЛ: алерт срабатывает на любой подтверждённый слом (метка слабого при этом скрыта, если «Показывать слабые сигналы» выключен). ВКЛ (по умолчанию): emit-сигнал отдаётся ТОЛЬКО при полном скоре (full). Локальный вдобавок гасится, если дублирует свежую глобальную зону (nearGlob) ИЛИ в том же баре эмитится глобальный той же стороны (глоб старше по рангу). Метка локального дополнительно убирается задним числом, если эмитящийся глобальный пришёл в пределах dupWindow баров после неё — уже ушедший локальный алерт при этом отозвать нельзя. Включай для стратегии/бэктеста, иначе фильтры на входы не влияют.")
 showVwap      = input.bool(false, "VWAP (линия)", group = G4)
 showAvwap     = input.bool(false, "Anchored VWAP (линия)", group = G4)
 showHtfEma    = input.bool(false, "EMA 50/200 старшего TF (линии)", group = G4)
@@ -332,6 +332,11 @@ var float glTop = na
 var box   glBox = na
 var int   ghBar = na
 var int   glBar = na
+// БАГФИКС: штамп бара, на котором создана текущая зона, — чтобы отличать
+// «попытка ломает текущую зону» от «пивот сменился в середине попытки»
+// (для глобальных ту же роль играют уже существующие ghBar/glBar)
+var int   lhZoneBar = na
+var int   llZoneBar = na
 
 var bool  lhSwept = false
 var bool  ghSwept = false
@@ -352,8 +357,12 @@ var int   aLHcnt = 0
 // БАГФИКС: бокс зоны привязан к КОНКРЕТНОЙ попытке, а не к переменной lhBox/
 // ghBox/llBox/glBox, которую новый пивот может переназначить на другой бокс,
 // пока эта попытка ещё активна — иначе при закрепе "пробитым" красится
-// бокс свежего пивота, а не бокс уровня, который реально сломан
+// бокс свежего пивота, а не бокс уровня, который реально сломан.
+// aXXzbar — штамп зоны попытки; aXXarch — бокс уже положен в архивный буфер
+// обработчиком нового пивота (чтобы не пушить второй раз при закрепе)
 var box   aLHbox = na
+var int   aLHzbar = na
+var bool  aLHarch = false
 
 var bool  aGHon = false
 var float aGHref = na
@@ -363,6 +372,8 @@ var bool  aGHwickOK = false
 var int   aGHbar = na
 var int   aGHcnt = 0
 var box   aGHbox = na
+var int   aGHzbar = na
+var bool  aGHarch = false
 
 var bool  aLLon = false
 var float aLLref = na
@@ -372,6 +383,8 @@ var bool  aLLwickOK = false
 var int   aLLbar = na
 var int   aLLcnt = 0
 var box   aLLbox = na
+var int   aLLzbar = na
+var bool  aLLarch = false
 
 var bool  aGLon = false
 var float aGLref = na
@@ -381,6 +394,8 @@ var bool  aGLwickOK = false
 var int   aGLbar = na
 var int   aGLcnt = 0
 var box   aGLbox = na
+var int   aGLzbar = na
+var bool  aGLarch = false
 
 // свип, зафиксированный за конкретной попыткой (фикс рассинхрона с зоной)
 var bool  aLHswept = false
@@ -528,16 +543,22 @@ if barstate.isconfirmed
         prevLocPH := phLoc
         prevLocPH_div := divNow
 
-        // БАГФИКС: раньше при живой попытке (aLHon) старый бокс архивировался
-        // в общий буфер здесь, но закреп ниже красит/архивирует lhBox — уже
-        // переназначенный на бокс НОВОГО пивота, а не тот, что реально
-        // сломан. Теперь бокс активной попытки живёт в aLHbox отдельно от
-        // lhBox и не трогается здесь; трогаем только orphan-бокс без попытки.
-        if not na(lhBox) and not aLHon
-            box.delete(lhBox)
+        // БАГФИКС: судьба старого бокса при новом пивоте — бокс живой попытки
+        // уходит в архивный буфер (aLHarch помечает, что при закрепе повторно
+        // пушить не нужно); бокс при ожидающем ретесте — тоже в архив; прочие
+        // удаляются, чтобы не утекать в лимит рисования
+        if not na(lhBox)
+            if aLHon and aLHzbar == lhZoneBar
+                pushLocBox(lhBox)
+                aLHarch := true
+            else if rtLHon
+                pushLocBox(lhBox)
+            else
+                box.delete(lhBox)
         lhTop := high[locLB]
         lhBot := math.max(open[locLB], close[locLB])
         lhBox := showLocZones ? box.new(pb, lhTop, bar_index, lhBot, border_color = color.new(bearCol, 45), bgcolor = color.new(bearCol, zoneTransp), border_width = 1) : na
+        lhZoneBar := bar_index
         lhSwept := false
 
     if not na(plLoc)
@@ -553,11 +574,18 @@ if barstate.isconfirmed
         prevLocPL := plLoc
         prevLocPL_div := divNow
 
-        if not na(llBox) and not aLLon
-            box.delete(llBox)
+        if not na(llBox)
+            if aLLon and aLLzbar == llZoneBar
+                pushLocBox(llBox)
+                aLLarch := true
+            else if rtLLon
+                pushLocBox(llBox)
+            else
+                box.delete(llBox)
         llBot := low[locLB]
         llTop := math.min(open[locLB], close[locLB])
         llBox := showLocZones ? box.new(pb, llTop, bar_index, llBot, border_color = color.new(bullCol, 45), bgcolor = color.new(bullCol, zoneTransp), border_width = 1) : na
+        llZoneBar := bar_index
         llSwept := false
 
     if not na(phGlob)
@@ -573,8 +601,14 @@ if barstate.isconfirmed
         prevGlobPH := phGlob
         prevGlobPH_div := divNow
 
-        if not na(ghBox) and not aGHon
-            box.delete(ghBox)
+        if not na(ghBox)
+            if aGHon and aGHzbar == ghBar
+                pushGlobBox(ghBox)
+                aGHarch := true
+            else if rtGHon
+                pushGlobBox(ghBox)
+            else
+                box.delete(ghBox)
         ghTop := high[globLB]
         ghBot := math.max(open[globLB], close[globLB])
         ghBox := showGlobZones ? box.new(pb, ghTop, bar_index, ghBot, border_color = color.new(bearCol, 10), bgcolor = color.new(bearCol, zoneTransp), border_width = 2) : na
@@ -594,8 +628,14 @@ if barstate.isconfirmed
         prevGlobPL := plGlob
         prevGlobPL_div := divNow
 
-        if not na(glBox) and not aGLon
-            box.delete(glBox)
+        if not na(glBox)
+            if aGLon and aGLzbar == glBar
+                pushGlobBox(glBox)
+                aGLarch := true
+            else if rtGLon
+                pushGlobBox(glBox)
+            else
+                box.delete(glBox)
         glBot := low[globLB]
         glTop := math.min(open[globLB], close[globLB])
         glBox := showGlobZones ? box.new(pb, glTop, bar_index, glBot, border_color = color.new(bullCol, 10), bgcolor = color.new(bullCol, zoneTransp), border_width = 2) : na
@@ -666,21 +706,31 @@ if barstate.isconfirmed
     zGL = strictRef ? glBot : glTop
 
     // ===== ПЕРЕПРИВЯЗКА ======================================================
+    // (aXXbox при гибели попытки только очищается: сам бокс либо остаётся текущей
+    // зоной, либо уже лежит в архивном буфере — обработчик пивота разрулил)
     if aLHon and not na(zLH) and zLH > aLHref
         aLHon := false
         aLHcnt := 0
+        aLHbox := na
+        aLHarch := false
         nRebind += 1
     if aGHon and not na(zGH) and zGH > aGHref
         aGHon := false
         aGHcnt := 0
+        aGHbox := na
+        aGHarch := false
         nRebind += 1
     if aLLon and not na(zLL) and zLL < aLLref
         aLLon := false
         aLLcnt := 0
+        aLLbox := na
+        aLLarch := false
         nRebind += 1
     if aGLon and not na(zGL) and zGL < aGLref
         aGLon := false
         aGLcnt := 0
+        aGLbox := na
+        aGLarch := false
         nRebind += 1
 
     // ===== РЕТЕСТ (фильтр C, только если useRetest) =========================
@@ -754,12 +804,11 @@ if barstate.isconfirmed
                 aLHcnt := 0
                 aLHswept := lhSwept
                 aLHbox := lhBox
-                // БАГФИКС: пивот подтверждается с лагом, поэтому свежепризнанный
-                // уровень часто уже оказывается ниже текущей цены — попытка
-                // "стартует" мгновенно без реального пересечения, раздувая
-                // счётчик "Пробоев начато". Считаем только настоящие кроссы.
-                if na(close[1]) or close[1] <= refLH
-                    nStarted += 1
+                aLHzbar := lhZoneBar
+                aLHarch := false
+                // nStarted считает ВСЕ армирования (как исходы nFail*/nSlom*) —
+                // иначе воронка рассинхронизируется и конверсия может превысить 100%
+                nStarted += 1
             if lhSwept
                 aLHswept := true
             if close > aLHwick
@@ -775,11 +824,19 @@ if barstate.isconfirmed
                 lhBrokenFar := aLHfar
                 if keepBroken and not na(aLHbox)
                     box.set_bgcolor(aLHbox, color.new(bearCol, math.max(zoneTransp - 15, 0)))
-                    pushLocBox(aLHbox)
-                    aLHbox := na
+                    // не пушим второй раз, если бокс уже положен в архив
+                    // обработчиком нового пивота — иначе дубль в буфере
+                    if not aLHarch
+                        pushLocBox(aLHbox)
                 else if not keepBroken and not na(aLHbox)
                     box.delete(aLHbox)
-                    aLHbox := na
+                // БАГФИКС: зона сломана — lhBox перестаёт отслеживаться (иначе
+                // «пробитая» зона тянется вправо и удаляется следующим пивотом),
+                // но только если попытка ломала именно текущую зону
+                if aLHzbar == lhZoneBar
+                    lhBox := na
+                aLHbox := na
+                aLHarch := false
                 if useRetest
                     // БАГФИКС: старый висящий ретест того же типа, перезаписанный
                     // новым закрепом, засчитывается как неподтверждённый, а не
@@ -804,12 +861,16 @@ if barstate.isconfirmed
                 nFailWindow += 1
                 aLHon := false
                 aLHcnt := 0
+                aLHbox := na
+                aLHarch := false
         else
             if aLHon
                 failedTry := true
                 nFailBack += 1
             aLHon := false
             aLHcnt := 0
+            aLHbox := na
+            aLHarch := false
     if showEarly
         eLHlbl := syncEarly(aLHon, aLHcnt, holdBars, eLHlbl, low, true, bullCol)
 
@@ -826,8 +887,9 @@ if barstate.isconfirmed
                 aLLcnt := 0
                 aLLswept := llSwept
                 aLLbox := llBox
-                if na(close[1]) or close[1] >= refLL
-                    nStarted += 1
+                aLLzbar := llZoneBar
+                aLLarch := false
+                nStarted += 1
             if llSwept
                 aLLswept := true
             if close < aLLwick
@@ -843,11 +905,14 @@ if barstate.isconfirmed
                 llBrokenFar := aLLfar
                 if keepBroken and not na(aLLbox)
                     box.set_bgcolor(aLLbox, color.new(bullCol, math.max(zoneTransp - 15, 0)))
-                    pushLocBox(aLLbox)
-                    aLLbox := na
+                    if not aLLarch
+                        pushLocBox(aLLbox)
                 else if not keepBroken and not na(aLLbox)
                     box.delete(aLLbox)
-                    aLLbox := na
+                if aLLzbar == llZoneBar
+                    llBox := na
+                aLLbox := na
+                aLLarch := false
                 if useRetest
                     if rtLLon
                         nRetestFail += 1
@@ -869,12 +934,16 @@ if barstate.isconfirmed
                 nFailWindow += 1
                 aLLon := false
                 aLLcnt := 0
+                aLLbox := na
+                aLLarch := false
         else
             if aLLon
                 failedTry := true
                 nFailBack += 1
             aLLon := false
             aLLcnt := 0
+            aLLbox := na
+            aLLarch := false
     if showEarly
         eLLlbl := syncEarly(aLLon, aLLcnt, holdBars, eLLlbl, high, false, bearCol)
 
@@ -891,8 +960,9 @@ if barstate.isconfirmed
                 aGHcnt := 0
                 aGHswept := ghSwept
                 aGHbox := ghBox
-                if na(close[1]) or close[1] <= refGH
-                    nStarted += 1
+                aGHzbar := ghBar
+                aGHarch := false
+                nStarted += 1
             if ghSwept
                 aGHswept := true
             if close > aGHwick
@@ -908,11 +978,14 @@ if barstate.isconfirmed
                 ghBrokenFar := aGHfar
                 if keepBroken and not na(aGHbox)
                     box.set_bgcolor(aGHbox, color.new(bearCol, math.max(zoneTransp - 15, 0)))
-                    pushGlobBox(aGHbox)
-                    aGHbox := na
+                    if not aGHarch
+                        pushGlobBox(aGHbox)
                 else if not keepBroken and not na(aGHbox)
                     box.delete(aGHbox)
-                    aGHbox := na
+                if aGHzbar == ghBar
+                    ghBox := na
+                aGHbox := na
+                aGHarch := false
                 if useRetest
                     if rtGHon
                         nRetestFail += 1
@@ -934,12 +1007,16 @@ if barstate.isconfirmed
                 nFailWindow += 1
                 aGHon := false
                 aGHcnt := 0
+                aGHbox := na
+                aGHarch := false
         else
             if aGHon
                 failedTry := true
                 nFailBack += 1
             aGHon := false
             aGHcnt := 0
+            aGHbox := na
+            aGHarch := false
     if showEarly
         eGHlbl := syncEarly(aGHon, aGHcnt, holdBars, eGHlbl, low, true, bullCol)
 
@@ -956,8 +1033,9 @@ if barstate.isconfirmed
                 aGLcnt := 0
                 aGLswept := glSwept
                 aGLbox := glBox
-                if na(close[1]) or close[1] >= refGL
-                    nStarted += 1
+                aGLzbar := glBar
+                aGLarch := false
+                nStarted += 1
             if glSwept
                 aGLswept := true
             if close < aGLwick
@@ -973,11 +1051,14 @@ if barstate.isconfirmed
                 glBrokenFar := aGLfar
                 if keepBroken and not na(aGLbox)
                     box.set_bgcolor(aGLbox, color.new(bullCol, math.max(zoneTransp - 15, 0)))
-                    pushGlobBox(aGLbox)
-                    aGLbox := na
+                    if not aGLarch
+                        pushGlobBox(aGLbox)
                 else if not keepBroken and not na(aGLbox)
                     box.delete(aGLbox)
-                    aGLbox := na
+                if aGLzbar == glBar
+                    glBox := na
+                aGLbox := na
+                aGLarch := false
                 if useRetest
                     if rtGLon
                         nRetestFail += 1
@@ -999,12 +1080,16 @@ if barstate.isconfirmed
                 nFailWindow += 1
                 aGLon := false
                 aGLcnt := 0
+                aGLbox := na
+                aGLarch := false
         else
             if aGLon
                 failedTry := true
                 nFailBack += 1
             aGLon := false
             aGLcnt := 0
+            aGLbox := na
+            aGLarch := false
     if showEarly
         eGLlbl := syncEarly(aGLon, aGLcnt, holdBars, eGLlbl, high, false, bearCol)
 
@@ -1049,6 +1134,13 @@ if barstate.isconfirmed
             pushSig(lb)
             locLblUp := lb
             locLblUpBar := bar_index
+            // новая метка — прежние стоп/тейк-объекты больше не её группа;
+            // ссылки сбрасываются здесь и переустанавливаются ниже, если
+            // стоп/тейк реально рисуется (БАГФИКС: раньше обнулялись в else
+            // пропущенного блока и теряли ещё живую группу старой метки)
+            locStopUp := na
+            locTakeUp := na
+            locTakeLblUp := na
             if showBrokenRef
                 ln = line.new(stb, lvl, bar_index, lvl, color = color.new(bullCol, 30), style = line.style_dotted, width = 1)
                 pushLocLine(ln)
@@ -1083,14 +1175,6 @@ if barstate.isconfirmed
                 locStopUp := stLn
                 locTakeUp := tkLn
                 locTakeLblUp := tkLbl
-            else
-                locStopUp := na
-                locTakeUp := na
-                locTakeLblUp := na
-        else
-            locStopUp := na
-            locTakeUp := na
-            locTakeLblUp := na
 
     if sigLocDn
         nLocSlom += 1
@@ -1132,6 +1216,9 @@ if barstate.isconfirmed
             pushSig(lb)
             locLblDn := lb
             locLblDnBar := bar_index
+            locStopDn := na
+            locTakeDn := na
+            locTakeLblDn := na
             if showBrokenRef
                 ln = line.new(stb, lvl, bar_index, lvl, color = color.new(bearCol, 30), style = line.style_dotted, width = 1)
                 pushLocLine(ln)
@@ -1166,14 +1253,6 @@ if barstate.isconfirmed
                 locStopDn := stLn
                 locTakeDn := tkLn
                 locTakeLblDn := tkLbl
-            else
-                locStopDn := na
-                locTakeDn := na
-                locTakeLblDn := na
-        else
-            locStopDn := na
-            locTakeDn := na
-            locTakeLblDn := na
 
     if sigGlobUp
         nGlobSlom += 1
@@ -1184,7 +1263,32 @@ if barstate.isconfirmed
             air := lvl <= globLastLvl
         globLastDir := 1
         globLastLvl := lvl
-        if not na(locLblUp) and not na(locLblUpBar) and bar_index - locLblUpBar <= dupWindow
+        float vpPoc = na
+        float vpVaLo = na
+        float vpVaHi = na
+        if useVpFilter or showVpLines
+            [vaP, vaLo, vaHi] = computeVA(vpLookback, vpRows, vpVaPct)
+            vpPoc := vaP
+            vpVaLo := vaLo
+            vpVaHi := vaHi
+        emaBad   = useEmaFilter and emaTrend == -1
+        htfBad   = useHtfEmaFilter and htfTrend == -1
+        vwapBad  = useVwapFilter and not na(vwapVal) and close < vwapVal
+        avwapBad = useAvwapFilter and not na(avwapVal) and close < avwapVal
+        vpBad    = useVpFilter and not na(vpVaHi) and close <= vpVaHi
+        oiBad    = useOiFilter and oiDataOK and not oiRising
+        // БАГФИКС: фильтр без данных (na) раньше молча засчитывался как
+        // пройденный и в totalChk, и в passChk — теперь исключается из
+        // скора целиком вместо притворного "n/n"
+        vpDataOK = not na(vpVaHi)
+        totalChk = 1 + (useEmaFilter and emaDataOK ? 1 : 0) + (useHtfEmaFilter and htfDataOK ? 1 : 0) + (useVwapFilter and vwapDataOK ? 1 : 0) + (useAvwapFilter and avwapDataOK ? 1 : 0) + (useVpFilter and vpDataOK ? 1 : 0) + (useOiFilter and oiDataOK ? 1 : 0)
+        passChk  = (air ? 0 : 1) + (useEmaFilter and emaDataOK ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter and htfDataOK ? (htfBad ? 0 : 1) : 0) + (useVwapFilter and vwapDataOK ? (vwapBad ? 0 : 1) : 0) + (useAvwapFilter and avwapDataOK ? (avwapBad ? 0 : 1) : 0) + (useVpFilter and vpDataOK ? (vpBad ? 0 : 1) : 0) + (useOiFilter and oiDataOK ? (oiBad ? 0 : 1) : 0)
+        full     = passChk == totalChk
+        emitGlobUp := not gateSignalsByScore or full
+        // БАГФИКС: дедуп локального — только если глобальный реально эмитится;
+        // раньше слабый глобальный (сам не показан и не эмитится) удалял
+        // полноскоровую локальную метку и гасил её алерт — сигнал исчезал целиком
+        if emitGlobUp and not na(locLblUp) and not na(locLblUpBar) and bar_index - locLblUpBar <= dupWindow
             removeSig(locLblUp)
             label.delete(locLblUp)
             locLblUp := na
@@ -1216,28 +1320,6 @@ if barstate.isconfirmed
                 removeStopTakeLbl(locTakeLblUp)
                 label.delete(locTakeLblUp)
                 locTakeLblUp := na
-        float vpPoc = na
-        float vpVaLo = na
-        float vpVaHi = na
-        if useVpFilter or showVpLines
-            [vaP, vaLo, vaHi] = computeVA(vpLookback, vpRows, vpVaPct)
-            vpPoc := vaP
-            vpVaLo := vaLo
-            vpVaHi := vaHi
-        emaBad   = useEmaFilter and emaTrend == -1
-        htfBad   = useHtfEmaFilter and htfTrend == -1
-        vwapBad  = useVwapFilter and not na(vwapVal) and close < vwapVal
-        avwapBad = useAvwapFilter and not na(avwapVal) and close < avwapVal
-        vpBad    = useVpFilter and not na(vpVaHi) and close <= vpVaHi
-        oiBad    = useOiFilter and oiDataOK and not oiRising
-        // БАГФИКС: фильтр без данных (na) раньше молча засчитывался как
-        // пройденный и в totalChk, и в passChk — теперь исключается из
-        // скора целиком вместо притворного "n/n"
-        vpDataOK = not na(vpVaHi)
-        totalChk = 1 + (useEmaFilter and emaDataOK ? 1 : 0) + (useHtfEmaFilter and htfDataOK ? 1 : 0) + (useVwapFilter and vwapDataOK ? 1 : 0) + (useAvwapFilter and avwapDataOK ? 1 : 0) + (useVpFilter and vpDataOK ? 1 : 0) + (useOiFilter and oiDataOK ? 1 : 0)
-        passChk  = (air ? 0 : 1) + (useEmaFilter and emaDataOK ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter and htfDataOK ? (htfBad ? 0 : 1) : 0) + (useVwapFilter and vwapDataOK ? (vwapBad ? 0 : 1) : 0) + (useAvwapFilter and avwapDataOK ? (avwapBad ? 0 : 1) : 0) + (useVpFilter and vpDataOK ? (vpBad ? 0 : 1) : 0) + (useOiFilter and oiDataOK ? (oiBad ? 0 : 1) : 0)
-        full     = passChk == totalChk
-        emitGlobUp := not gateSignalsByScore or full
         if showGlob and (full or showWeak)
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
             txt = "ГЛОБ↑" + scoreTxt
@@ -1267,7 +1349,29 @@ if barstate.isconfirmed
             air := lvl >= globLastLvl
         globLastDir := -1
         globLastLvl := lvl
-        if not na(locLblDn) and not na(locLblDnBar) and bar_index - locLblDnBar <= dupWindow
+        float vpPoc = na
+        float vpVaLo = na
+        float vpVaHi = na
+        if useVpFilter or showVpLines
+            [vaP, vaLo, vaHi] = computeVA(vpLookback, vpRows, vpVaPct)
+            vpPoc := vaP
+            vpVaLo := vaLo
+            vpVaHi := vaHi
+        emaBad   = useEmaFilter and emaTrend == 1
+        htfBad   = useHtfEmaFilter and htfTrend == 1
+        vwapBad  = useVwapFilter and not na(vwapVal) and close > vwapVal
+        avwapBad = useAvwapFilter and not na(avwapVal) and close > avwapVal
+        vpBad    = useVpFilter and not na(vpVaLo) and close >= vpVaLo
+        oiBad    = useOiFilter and oiDataOK and not oiRising
+        // БАГФИКС: фильтр без данных (na) раньше молча засчитывался как
+        // пройденный и в totalChk, и в passChk — теперь исключается из
+        // скора целиком вместо притворного "n/n"
+        vpDataOK = not na(vpVaLo)
+        totalChk = 1 + (useEmaFilter and emaDataOK ? 1 : 0) + (useHtfEmaFilter and htfDataOK ? 1 : 0) + (useVwapFilter and vwapDataOK ? 1 : 0) + (useAvwapFilter and avwapDataOK ? 1 : 0) + (useVpFilter and vpDataOK ? 1 : 0) + (useOiFilter and oiDataOK ? 1 : 0)
+        passChk  = (air ? 0 : 1) + (useEmaFilter and emaDataOK ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter and htfDataOK ? (htfBad ? 0 : 1) : 0) + (useVwapFilter and vwapDataOK ? (vwapBad ? 0 : 1) : 0) + (useAvwapFilter and avwapDataOK ? (avwapBad ? 0 : 1) : 0) + (useVpFilter and vpDataOK ? (vpBad ? 0 : 1) : 0) + (useOiFilter and oiDataOK ? (oiBad ? 0 : 1) : 0)
+        full     = passChk == totalChk
+        emitGlobDn := not gateSignalsByScore or full
+        if emitGlobDn and not na(locLblDn) and not na(locLblDnBar) and bar_index - locLblDnBar <= dupWindow
             removeSig(locLblDn)
             label.delete(locLblDn)
             locLblDn := na
@@ -1299,28 +1403,6 @@ if barstate.isconfirmed
                 removeStopTakeLbl(locTakeLblDn)
                 label.delete(locTakeLblDn)
                 locTakeLblDn := na
-        float vpPoc = na
-        float vpVaLo = na
-        float vpVaHi = na
-        if useVpFilter or showVpLines
-            [vaP, vaLo, vaHi] = computeVA(vpLookback, vpRows, vpVaPct)
-            vpPoc := vaP
-            vpVaLo := vaLo
-            vpVaHi := vaHi
-        emaBad   = useEmaFilter and emaTrend == 1
-        htfBad   = useHtfEmaFilter and htfTrend == 1
-        vwapBad  = useVwapFilter and not na(vwapVal) and close > vwapVal
-        avwapBad = useAvwapFilter and not na(avwapVal) and close > avwapVal
-        vpBad    = useVpFilter and not na(vpVaLo) and close >= vpVaLo
-        oiBad    = useOiFilter and oiDataOK and not oiRising
-        // БАГФИКС: фильтр без данных (na) раньше молча засчитывался как
-        // пройденный и в totalChk, и в passChk — теперь исключается из
-        // скора целиком вместо притворного "n/n"
-        vpDataOK = not na(vpVaLo)
-        totalChk = 1 + (useEmaFilter and emaDataOK ? 1 : 0) + (useHtfEmaFilter and htfDataOK ? 1 : 0) + (useVwapFilter and vwapDataOK ? 1 : 0) + (useAvwapFilter and avwapDataOK ? 1 : 0) + (useVpFilter and vpDataOK ? 1 : 0) + (useOiFilter and oiDataOK ? 1 : 0)
-        passChk  = (air ? 0 : 1) + (useEmaFilter and emaDataOK ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter and htfDataOK ? (htfBad ? 0 : 1) : 0) + (useVwapFilter and vwapDataOK ? (vwapBad ? 0 : 1) : 0) + (useAvwapFilter and avwapDataOK ? (avwapBad ? 0 : 1) : 0) + (useVpFilter and vpDataOK ? (vpBad ? 0 : 1) : 0) + (useOiFilter and oiDataOK ? (oiBad ? 0 : 1) : 0)
-        full     = passChk == totalChk
-        emitGlobDn := not gateSignalsByScore or full
         if showGlob and (full or showWeak)
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
             txt = "ГЛОБ↓" + scoreTxt
@@ -1394,20 +1476,18 @@ if (showTrend or showFunnel) and barstate.islast
         table.cell(tp, 1, 11, str.tostring(nLocSlom) + " / " + str.tostring(nGlobSlom) + (na(conv) ? "" : "  " + str.tostring(conv, "#") + "%"), text_size = size.tiny, text_color = txtC, bgcolor = hdrBg)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// БАГФИКС: раньше гасили по emitGlobUp/Dn (только полный скор глобального),
-// а метку локального сигнала выше удаляем по sigGlobUp/Dn (любой скор) —
-// расхождение: алерт мог уйти, а на графике сигнала не видно вообще.
-// Теперь оба гасятся по одному и тому же условию.
-if sigGlobUp
+// Локальный гасится глобальным той же стороны ТОЛЬКО если глобальный реально
+// эмитится — тем же условием, что и удаление локальной метки в блоке дедупа
+// выше. Слабый глобальный (не показан, не эмитится) локальный не трогает.
+if emitGlobUp
     emitLocUp := false
-if sigGlobDn
+if emitGlobDn
     emitLocDn := false
 
 alertcondition(emitGlobUp, "Глобальный слом ВВЕРХ", "Слом: глобальный ВВЕРХ")
 alertcondition(emitGlobDn, "Глобальный слом ВНИЗ",  "Слом: глобальный ВНИЗ")
 alertcondition(emitLocUp,  "Локальный слом ВВЕРХ",  "Слом: локальный ВВЕРХ")
 alertcondition(emitLocDn,  "Локальный слом ВНИЗ",   "Слом: локальный ВНИЗ")
-
 // ═════════════════════════════════════════════════════════════════════════════
 // 8. ИСПОЛНЕНИЕ СТРАТЕГИИ (обёртка вокруг сигнального ядра индикатора)
 //    Переиспользует уже посчитанные emit-сигналы и структурные уровни sFar*.
