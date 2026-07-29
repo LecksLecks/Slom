@@ -1,0 +1,6 @@
+# Local runtime state written by the ruflo-core plugin's hooks (PID files,
+# daemon logs, metrics caches, tuned local config) — machine/session-local,
+# not source content, must not be committed.
+.claude-flow/
+.claude/proven-config.json
+.claude/.proven-config-version
