@@ -32,8 +32,11 @@ showTrend  = input.bool(true, "Панель тренда", group = G5)
 showFunnel = input.bool(true, "Счётчики воронки", group = G5)
 
 G3 = "5. Дубли ЛОК/ГЛОБ"
-dupATR    = input.float(0.5, "Уровни считать одним, если ближе × ATR14", minval = 0.0, step = 0.1, group = G3)
-dupWindow = input.int(10, "Глобальный удаляет метку локального / глобальная зона считается «свежей» в пределах, баров", minval = 0, group = G3)
+// БАГФИКС: порог близости уровней (dupATR) убран вместе с подавлением
+// локального по факту близости свежей глобальной ЗОНЫ — дедуп теперь работает
+// только по факту реально эмитящегося и нарисованного глобального сигнала,
+// поэтому у порога не осталось потребителя (был мёртвой настройкой)
+dupWindow = input.int(10, "Глобальный удаляет метку локального в пределах, баров", minval = 0, maxval = 200, group = G3, tooltip = "Окно, в котором уже нарисованная локальная метка (и её линия/стоп-тейк) снимается задним числом эмитящимся глобальным сломом той же стороны. Алерт, который уже ушёл, отозвать нельзя.")
 
 G4 = "6. Визуализация"
 showLocZones  = input.bool(true, "Зоны локальных сломов", group = G4)
@@ -48,8 +51,8 @@ showWeak      = input.bool(false, "Показывать слабые сигна�
 showFailed    = input.bool(false, "Сгоревшие попытки закрепа", group = G4)
 showEarly     = input.bool(false, "Ранний слом — метка на неподтверждённой попытке (не сигнал)", group = G4)
 showVpLines   = input.bool(false, "Показывать POC/Value Area на сломе", group = G4)
-showSweep     = input.bool(true,  "Метка свипа на зоне (виден только если useSweepFilter включён)", group = G4)
-gateSignalsByScore = input.bool(true, "Алерты/стратегия — только полный скор (n/m = 100%, без дублей)", group = G4, tooltip = "ВКЛ (по умолчанию): emit-сигнал отдаётся ТОЛЬКО при полном скоре (full); локальный вдобавок гасится, если дублирует свежую глобальную зону (nearGlob). ВЫКЛ: алерт срабатывает на любой подтверждённый слом — но метка при этом может отсутствовать: слабые скрыты без «Показывать слабые сигналы», а nearGlob-дубль не рисуется вовсе. В ОБОИХ режимах эмитящийся глобальный старше по рангу: он гасит локальный алерт того же бара и задним числом убирает локальную метку/стоп-тейк в пределах dupWindow баров — уже ушедший локальный алерт при этом отозвать нельзя. Включай для стратегии/бэктеста, иначе фильтры на входы не влияют.")
+showSweep     = input.bool(true,  "Метка свипа уровня — зоны или активной попытки (видна только если useSweepFilter включён)", group = G4)
+gateSignalsByScore = input.bool(true, "Алерты/стратегия — только полный скор (n/m = 100%, без дублей)", group = G4, tooltip = "ВКЛ (по умолчанию): emit-сигнал отдаётся ТОЛЬКО при полном скоре (full). ВЫКЛ: алерт срабатывает на любой подтверждённый слом — но метка при этом может отсутствовать: слабые скрыты без «Показывать слабые сигналы». В ОБОИХ режимах эмитящийся глобальный старше по рангу: он гасит локальный алерт того же бара и задним числом убирает локальную метку/стоп-тейк в пределах dupWindow баров, но только если глобальный сигнал сам виден на графике (полный скор либо включённые слабые) — уже ушедший локальный алерт при этом отозвать нельзя. Включай для стратегии/бэктеста, иначе фильтры на входы не влияют.")
 showVwap      = input.bool(false, "VWAP (линия)", group = G4)
 showAvwap     = input.bool(false, "Anchored VWAP (линия)", group = G4)
 showHtfEma    = input.bool(false, "EMA 50/200 старшего TF (линии)", group = G4)
@@ -60,7 +63,7 @@ neutCol = color.new(color.gray, 0)
 
 G6 = "7. Доп. фильтры (ложные сломы)"
 useVolFilter = input.bool(false, "Фильтр по объёму", group = G6)
-volLen       = input.int(20, "Объём: период SMA", minval = 2, group = G6)
+volLen       = input.int(20, "Объём: период SMA", minval = 2, maxval = 200, group = G6, tooltip = "Ограничено буфером истории (max_bars_back=500): скользящая сумма внутри SMA обращается примерно на length+1 баров назад, потолок 200 держит запас.")
 volMult      = input.float(1.2, "Объём: множитель от SMA", minval = 0.1, step = 0.1, group = G6)
 
 useEmaFilter = input.bool(false, "Слом против EMA — снижает скор", group = G6)
@@ -82,14 +85,14 @@ useOiFilter = input.bool(false, "Слом без роста Open Interest — с
 oiLookback  = input.int(5, "OI: окно сравнения, баров", minval = 1, maxval = 50, group = G6)
 
 useRetest     = input.bool(false, "Требовать ретест с отбоем перед сигналом", group = G6)
-retestATR     = input.float(1.0, "Ретест: допуск от уровня, × ATR14", minval = 0.1, step = 0.1, group = G6)
+retestATR     = input.float(0.5, "Ретест: допуск от уровня, × ATR14", minval = 0.1, step = 0.1, group = G6, tooltip = "Насколько близко к сломанному уровню должна вернуться цена, чтобы это считалось ретестом. Большие значения (≈1 ATR и выше) делают фильтр почти сквозным: бар сразу после закрепа попадает в допуск тривиально, и «ретест» вырождается в ожидание одной свечи.")
 retestWindow  = input.int(10, "Ретест: окно ожидания, баров", minval = 2, maxval = 200, group = G6)
 
 useSession = input.bool(false, "Фильтр по сессии — не начинать пробой вне сессии", group = G6)
 sessTime   = input.session("0800-2200", "Разрешённая сессия (UTC)", group = G6)
 
 useSqueezeFilter = input.bool(false, "Фильтр сжатия волатильности — не начинать пробой в сквизе", group = G6)
-atrSmaLen        = input.int(50, "Волатильность: период средней ATR", minval = 5, group = G6)
+atrSmaLen        = input.int(50, "Волатильность: период средней ATR", minval = 5, maxval = 200, group = G6, tooltip = "Ограничено буфером истории (max_bars_back=500): SMA по ATR14 обращается примерно на length+1 баров назад, потолок 200 держит запас.")
 squeezeMult      = input.float(0.7, "Сквиз, если ATR14 < × средней ATR", minval = 0.1, step = 0.05, group = G6)
 
 useSweepFilter = input.bool(false, "Требовать свип уровня (тень + ATR-буфер, закрытие обратно) до закрепа", group = G6)
@@ -110,6 +113,11 @@ slBufferViz  = input.float(0.3, "Стоп: доп. буфер за зоной, �
 strictRef  = refMode == "Конец тени (строго)"
 needWickOK = refMode == "Тело + подтверждение тенью"
 
+// БАГФИКС: в тултипе сигнала считается интервал «бар пробоя → бар сигнала».
+// Без ретеста бар сигнала = бар закрепа, а с ретестом в этот же интервал
+// попадает ещё и окно ожидания отбоя — текст не должен выдавать одно за другое
+sigBarsTxt = useRetest ? "\nБаров от пробоя до сигнала (вкл. ожидание ретеста): " : "\nБаров от пробоя до закрепа: "
+
 // ─────────────────────────────────────────────────────────────────────────────
 emaFast  = ta.ema(close, 50)
 emaSlow  = ta.ema(close, 200)
@@ -127,7 +135,11 @@ htfDataOK  = not na(htfEmaFast) and not na(htfEmaSlow) and not na(htfClose)
 vwapVal = ta.vwap
 vwapDataOK = not na(vwapVal)
 
-oiClose  = request.security(syminfo.tickerid + "_OI", timeframe.period, close[1], barmerge.gaps_off, barmerge.lookahead_off, ignore_invalid_symbol = true)
+// БАГФИКС: без сдвига [1]. TF запроса = TF графика, будущих данных здесь взять
+// неоткуда (lookahead_off + сигнальное ядро работает только на подтверждённых
+// барах), а сдвиг выбрасывал из окна сравнения сам бар слома — рост OI именно
+// на сломе фильтр не видел
+oiClose  = request.security(syminfo.tickerid + "_OI", timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_off, ignore_invalid_symbol = true)
 oiDataOK = not na(oiClose) and not na(oiClose[oiLookback])
 oiRising = oiDataOK and oiClose > oiClose[oiLookback]
 
@@ -507,6 +519,13 @@ bool emitLocDn  = false
 bool emitGlobUp = false
 bool emitGlobDn = false
 
+// БАГФИКС: глобальный сигнал имеет право гасить локальный (алерт + метку),
+// только если он и сам материализуется на графике — полный скор либо
+// включённые слабые сигналы; невидимый слабый глобальный раньше уносил
+// полноскоровый локальный с собой в тишину
+bool globVisUp = false
+bool globVisDn = false
+
 float sLvlLocUp = na
 float sLvlLocDn = na
 float sLvlGlobUp = na
@@ -657,24 +676,61 @@ if barstate.isconfirmed
     if not na(glBox)
         box.set_right(glBox, bar_index)
 
+    // БАГФИКС: бокс попытки, уже отправленный в архивный буфер обработчиком
+    // нового пивота (aXXarch), больше не lhBox/llBox/ghBox/glBox и без явного
+    // продления обрывался на баре пивота — хотя попытка жива и зона ещё
+    // работает. Тянем его вправо, пока попытка не закончится (закреп/смерть),
+    // после чего aXXbox := na и правый край замирает на баре исхода.
+    if aLHarch and not na(aLHbox)
+        box.set_right(aLHbox, bar_index)
+    if aLLarch and not na(aLLbox)
+        box.set_right(aLLbox, bar_index)
+    if aGHarch and not na(aGHbox)
+        box.set_right(aGHbox, bar_index)
+    if aGLarch and not na(aGLbox)
+        box.set_right(aGLbox, bar_index)
+
     // ===== СВИП ЛИКВИДНОСТИ (фильтр D) ======================================
+    // БАГФИКС: свип ЖИВОЙ попытки детектится против ЕЁ СОБСТВЕННОГО уровня
+    // (aXXwick), а не против текущей зоны. После смены пивота без перепривязки
+    // lhTop/llBot/ghTop/glBot — уже другой уровень, и попытка засчитывала себе
+    // чужой свип, которого её уровень не видел (useSweepFilter обходился).
+    // Флаг зоны (lhSwept/…) остаётся: его наследует новая попытка в момент
+    // армирования — это свип, случившийся ДО начала пробоя. Метка рисуется
+    // один раз: при совпадении уровней её даёт ветка зоны.
     if useSweepFilter
         if not lhSwept and not na(lhTop) and high >= lhTop + sweepATR * atr14 and close < lhTop
             lhSwept := true
             if showSweep
                 pushSweep(label.new(bar_index, high, "свип", style = label.style_label_down, color = color.new(neutCol, 40), textcolor = color.white, size = size.tiny, tooltip = "Свип ЛОК-хая: тень выше " + str.tostring(lhTop, format.mintick) + ", закрытие обратно"))
+        if aLHon and not aLHswept and not na(aLHwick) and high >= aLHwick + sweepATR * atr14 and close < aLHwick
+            aLHswept := true
+            if showSweep and aLHwick != lhTop
+                pushSweep(label.new(bar_index, high, "свип", style = label.style_label_down, color = color.new(neutCol, 40), textcolor = color.white, size = size.tiny, tooltip = "Свип уровня активной попытки (ЛОК-хай " + str.tostring(aLHwick, format.mintick) + "): тень выше, закрытие обратно"))
         if not llSwept and not na(llBot) and low <= llBot - sweepATR * atr14 and close > llBot
             llSwept := true
             if showSweep
                 pushSweep(label.new(bar_index, low, "свип", style = label.style_label_up, color = color.new(neutCol, 40), textcolor = color.white, size = size.tiny, tooltip = "Свип ЛОК-лоя: тень ниже " + str.tostring(llBot, format.mintick) + ", закрытие обратно"))
+        if aLLon and not aLLswept and not na(aLLwick) and low <= aLLwick - sweepATR * atr14 and close > aLLwick
+            aLLswept := true
+            if showSweep and aLLwick != llBot
+                pushSweep(label.new(bar_index, low, "свип", style = label.style_label_up, color = color.new(neutCol, 40), textcolor = color.white, size = size.tiny, tooltip = "Свип уровня активной попытки (ЛОК-лой " + str.tostring(aLLwick, format.mintick) + "): тень ниже, закрытие обратно"))
         if not ghSwept and not na(ghTop) and high >= ghTop + sweepATR * atr14 and close < ghTop
             ghSwept := true
             if showSweep
                 pushSweep(label.new(bar_index, high, "свип", style = label.style_label_down, color = color.new(neutCol, 20), textcolor = color.white, size = size.small, tooltip = "Свип ГЛОБ-хая: тень выше " + str.tostring(ghTop, format.mintick) + ", закрытие обратно"))
+        if aGHon and not aGHswept and not na(aGHwick) and high >= aGHwick + sweepATR * atr14 and close < aGHwick
+            aGHswept := true
+            if showSweep and aGHwick != ghTop
+                pushSweep(label.new(bar_index, high, "свип", style = label.style_label_down, color = color.new(neutCol, 20), textcolor = color.white, size = size.small, tooltip = "Свип уровня активной попытки (ГЛОБ-хай " + str.tostring(aGHwick, format.mintick) + "): тень выше, закрытие обратно"))
         if not glSwept and not na(glBot) and low <= glBot - sweepATR * atr14 and close > glBot
             glSwept := true
             if showSweep
                 pushSweep(label.new(bar_index, low, "свип", style = label.style_label_up, color = color.new(neutCol, 20), textcolor = color.white, size = size.small, tooltip = "Свип ГЛОБ-лоя: тень ниже " + str.tostring(glBot, format.mintick) + ", закрытие обратно"))
+        if aGLon and not aGLswept and not na(aGLwick) and low <= aGLwick - sweepATR * atr14 and close > aGLwick
+            aGLswept := true
+            if showSweep and aGLwick != glBot
+                pushSweep(label.new(bar_index, low, "свип", style = label.style_label_up, color = color.new(neutCol, 20), textcolor = color.white, size = size.small, tooltip = "Свип уровня активной попытки (ГЛОБ-лой " + str.tostring(aGLwick, format.mintick) + "): тень ниже, закрытие обратно"))
 
     // ===== СБРОС «УЖЕ СЛОМАН» ===============================================
     if not na(lhBroken) and close < lhBrokenFar
@@ -828,8 +884,6 @@ if barstate.isconfirmed
                 // nStarted считает ВСЕ армирования (как исходы nFail*/nSlom*) —
                 // иначе воронка рассинхронизируется и конверсия может превысить 100%
                 nStarted += 1
-            if lhSwept
-                aLHswept := true
             if close > aLHwick
                 aLHwickOK := true
             if impUpC
@@ -858,6 +912,10 @@ if barstate.isconfirmed
                 // но только если попытка ломала именно текущую зону
                 if aLHzbar == lhZoneBar
                     lhBox := na
+                    // БАГФИКС: и флаг свипа тоже — иначе после «воскрешения»
+                    // уровня новая попытка унаследует свип, который был засчитан
+                    // ещё прошлому пробою (уровень должен быть свипнут заново)
+                    lhSwept := false
                 aLHbox := na
                 aLHarch := false
                 if useRetest
@@ -919,8 +977,6 @@ if barstate.isconfirmed
                 aLLzbar := llZoneBar
                 aLLarch := false
                 nStarted += 1
-            if llSwept
-                aLLswept := true
             if close < aLLwick
                 aLLwickOK := true
             if impDnC
@@ -942,6 +998,7 @@ if barstate.isconfirmed
                     box.delete(aLLbox)
                 if aLLzbar == llZoneBar
                     llBox := na
+                    llSwept := false
                 aLLbox := na
                 aLLarch := false
                 if useRetest
@@ -1000,8 +1057,6 @@ if barstate.isconfirmed
                 aGHzbar := ghBar
                 aGHarch := false
                 nStarted += 1
-            if ghSwept
-                aGHswept := true
             if close > aGHwick
                 aGHwickOK := true
             if impUpC
@@ -1023,6 +1078,7 @@ if barstate.isconfirmed
                     box.delete(aGHbox)
                 if aGHzbar == ghBar
                     ghBox := na
+                    ghSwept := false
                 aGHbox := na
                 aGHarch := false
                 if useRetest
@@ -1081,8 +1137,6 @@ if barstate.isconfirmed
                 aGLzbar := glBar
                 aGLarch := false
                 nStarted += 1
-            if glSwept
-                aGLswept := true
             if close < aGLwick
                 aGLwickOK := true
             if impDnC
@@ -1104,6 +1158,7 @@ if barstate.isconfirmed
                     box.delete(aGLbox)
                 if aGLzbar == glBar
                     glBox := na
+                    glSwept := false
                 aGLbox := na
                 aGLarch := false
                 if useRetest
@@ -1156,8 +1211,6 @@ if barstate.isconfirmed
             air := lvl <= locLastLvl
         locLastDir := 1
         locLastLvl := lvl
-        gRef = zGH
-        nearGlob = not na(gRef) and math.abs(lvl - gRef) <= dupATR * atr14 and not na(ghBar) and (bar_index - ghBar <= dupWindow)
         float vpPoc = na
         float vpVaLo = na
         float vpVaHi = na
@@ -1179,11 +1232,17 @@ if barstate.isconfirmed
         totalChk = 1 + (useEmaFilter and emaDataOK ? 1 : 0) + (useHtfEmaFilter and htfDataOK ? 1 : 0) + (useVwapFilter and vwapDataOK ? 1 : 0) + (useAvwapFilter and avwapDataOK ? 1 : 0) + (useVpFilter and vpDataOK ? 1 : 0) + (useOiFilter and oiDataOK ? 1 : 0)
         passChk  = (air ? 0 : 1) + (useEmaFilter and emaDataOK ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter and htfDataOK ? (htfBad ? 0 : 1) : 0) + (useVwapFilter and vwapDataOK ? (vwapBad ? 0 : 1) : 0) + (useAvwapFilter and avwapDataOK ? (avwapBad ? 0 : 1) : 0) + (useVpFilter and vpDataOK ? (vpBad ? 0 : 1) : 0) + (useOiFilter and oiDataOK ? (oiBad ? 0 : 1) : 0)
         full     = passChk == totalChk
-        emitLocUp := not gateSignalsByScore or (full and not nearGlob)
-        if showLoc and not nearGlob and (full or showWeak)
+        // БАГФИКС: локальный больше не гасится по факту близости свежей
+        // глобальной ЗОНЫ (nearGlob). Если глобальная попытка на этой зоне так
+        // и не закреплялась, полноскоровый локальный сигнал пропадал молча —
+        // без метки и без алерта. Теперь локальный отдаётся сразу, а гасит его
+        // только реально эмитящийся глобальный: того же бара (блок в конце
+        // файла) или задним числом в пределах dupWindow баров (дедуп ниже).
+        emitLocUp := not gateSignalsByScore or full
+        if showLoc and (full or showWeak)
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
             txt = "ЛОК↑" + scoreTxt
-            lb = label.new(bar_index, low, txt, style = label.style_label_up, color = color.new(bullCol, full ? 15 : 60), textcolor = color.white, size = size.tiny, tooltip = "ЛОКАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
+            lb = label.new(bar_index, low, txt, style = label.style_label_up, color = color.new(bullCol, full ? 15 : 60), textcolor = color.white, size = size.tiny, tooltip = "ЛОКАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + sigBarsTxt + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
             pushSig(lb)
             locLblUp := lb
             locLblUpBar := bar_index
@@ -1214,7 +1273,7 @@ if barstate.isconfirmed
                 locVpPocUp := na
                 locVpVaHiUp := na
                 locVpVaLoUp := na
-        if showStopTake and not nearGlob and (full or showWeak)
+        if showStopTake and (full or showWeak)
             stopLvl = sFarLocUp - slBufferViz * atr14
             stopDist = close - stopLvl
             if stopDist > 0
@@ -1241,8 +1300,6 @@ if barstate.isconfirmed
             air := lvl >= locLastLvl
         locLastDir := -1
         locLastLvl := lvl
-        gRef = zGL
-        nearGlob = not na(gRef) and math.abs(lvl - gRef) <= dupATR * atr14 and not na(glBar) and (bar_index - glBar <= dupWindow)
         float vpPoc = na
         float vpVaLo = na
         float vpVaHi = na
@@ -1264,11 +1321,11 @@ if barstate.isconfirmed
         totalChk = 1 + (useEmaFilter and emaDataOK ? 1 : 0) + (useHtfEmaFilter and htfDataOK ? 1 : 0) + (useVwapFilter and vwapDataOK ? 1 : 0) + (useAvwapFilter and avwapDataOK ? 1 : 0) + (useVpFilter and vpDataOK ? 1 : 0) + (useOiFilter and oiDataOK ? 1 : 0)
         passChk  = (air ? 0 : 1) + (useEmaFilter and emaDataOK ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter and htfDataOK ? (htfBad ? 0 : 1) : 0) + (useVwapFilter and vwapDataOK ? (vwapBad ? 0 : 1) : 0) + (useAvwapFilter and avwapDataOK ? (avwapBad ? 0 : 1) : 0) + (useVpFilter and vpDataOK ? (vpBad ? 0 : 1) : 0) + (useOiFilter and oiDataOK ? (oiBad ? 0 : 1) : 0)
         full     = passChk == totalChk
-        emitLocDn := not gateSignalsByScore or (full and not nearGlob)
-        if showLoc and not nearGlob and (full or showWeak)
+        emitLocDn := not gateSignalsByScore or full
+        if showLoc and (full or showWeak)
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
             txt = "ЛОК↓" + scoreTxt
-            lb = label.new(bar_index, high, txt, style = label.style_label_down, color = color.new(bearCol, full ? 15 : 60), textcolor = color.white, size = size.tiny, tooltip = "ЛОКАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
+            lb = label.new(bar_index, high, txt, style = label.style_label_down, color = color.new(bearCol, full ? 15 : 60), textcolor = color.white, size = size.tiny, tooltip = "ЛОКАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + sigBarsTxt + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
             pushSig(lb)
             locLblDn := lb
             locLblDnBar := bar_index
@@ -1295,7 +1352,7 @@ if barstate.isconfirmed
                 locVpPocDn := na
                 locVpVaHiDn := na
                 locVpVaLoDn := na
-        if showStopTake and not nearGlob and (full or showWeak)
+        if showStopTake and (full or showWeak)
             stopLvl = sFarLocDn + slBufferViz * atr14
             stopDist = stopLvl - close
             if stopDist > 0
@@ -1342,10 +1399,13 @@ if barstate.isconfirmed
         passChk  = (air ? 0 : 1) + (useEmaFilter and emaDataOK ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter and htfDataOK ? (htfBad ? 0 : 1) : 0) + (useVwapFilter and vwapDataOK ? (vwapBad ? 0 : 1) : 0) + (useAvwapFilter and avwapDataOK ? (avwapBad ? 0 : 1) : 0) + (useVpFilter and vpDataOK ? (vpBad ? 0 : 1) : 0) + (useOiFilter and oiDataOK ? (oiBad ? 0 : 1) : 0)
         full     = passChk == totalChk
         emitGlobUp := not gateSignalsByScore or full
-        // БАГФИКС: дедуп локального — только если глобальный реально эмитится;
-        // раньше слабый глобальный (сам не показан и не эмитится) удалял
-        // полноскоровую локальную метку и гасил её алерт — сигнал исчезал целиком
-        if emitGlobUp and not na(locLblUpBar) and bar_index - locLblUpBar <= dupWindow
+        // БАГФИКС: дедуп локального — только если глобальный И эмитится, И сам
+        // материализуется на графике. При gateSignalsByScore=ВЫКЛ эмитится любой
+        // глобальный, включая слабый, а при showWeak=ВЫКЛ слабый не рисуется:
+        // раньше такой невидимый глобальный стирал полноскоровую локальную метку
+        // со стоп-тейком — алерт «глобальный слом» уходил, на графике пусто
+        globVisUp := full or showWeak
+        if emitGlobUp and globVisUp and not na(locLblUpBar) and bar_index - locLblUpBar <= dupWindow
             if not na(locLblUp)
                 removeSig(locLblUp)
                 label.delete(locLblUp)
@@ -1378,10 +1438,10 @@ if barstate.isconfirmed
                 removeStopTakeLbl(locTakeLblUp)
                 label.delete(locTakeLblUp)
                 locTakeLblUp := na
-        if showGlob and (full or showWeak)
+        if showGlob and globVisUp
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
             txt = "ГЛОБ↑" + scoreTxt
-            glb = label.new(bar_index, low, txt, style = label.style_label_up, color = color.new(bullCol, full ? 0 : 55), textcolor = color.white, size = size.small, tooltip = "ГЛОБАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
+            glb = label.new(bar_index, low, txt, style = label.style_label_up, color = color.new(bullCol, full ? 0 : 55), textcolor = color.white, size = size.small, tooltip = "ГЛОБАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + sigBarsTxt + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
             pushSig(glb)
             if showBrokenRef
                 pushGlobLine(line.new(stb, lvl, bar_index, lvl, color = color.new(bullCol, 10), style = line.style_dashed, width = 1))
@@ -1389,7 +1449,7 @@ if barstate.isconfirmed
                 pushGlobLine(line.new(bar_index - vpLookback + 1, vpPoc, bar_index, vpPoc, color = color.new(color.yellow, 20), width = 2))
                 pushGlobLine(line.new(bar_index - vpLookback + 1, vpVaHi, bar_index, vpVaHi, color = color.new(color.yellow, 60), style = line.style_dotted, width = 1))
                 pushGlobLine(line.new(bar_index - vpLookback + 1, vpVaLo, bar_index, vpVaLo, color = color.new(color.yellow, 60), style = line.style_dotted, width = 1))
-        if showStopTake and (full or showWeak)
+        if showStopTake and globVisUp
             stopLvl = sFarGlobUp - slBufferViz * atr14
             stopDist = close - stopLvl
             if stopDist > 0
@@ -1429,7 +1489,8 @@ if barstate.isconfirmed
         passChk  = (air ? 0 : 1) + (useEmaFilter and emaDataOK ? (emaBad ? 0 : 1) : 0) + (useHtfEmaFilter and htfDataOK ? (htfBad ? 0 : 1) : 0) + (useVwapFilter and vwapDataOK ? (vwapBad ? 0 : 1) : 0) + (useAvwapFilter and avwapDataOK ? (avwapBad ? 0 : 1) : 0) + (useVpFilter and vpDataOK ? (vpBad ? 0 : 1) : 0) + (useOiFilter and oiDataOK ? (oiBad ? 0 : 1) : 0)
         full     = passChk == totalChk
         emitGlobDn := not gateSignalsByScore or full
-        if emitGlobDn and not na(locLblDnBar) and bar_index - locLblDnBar <= dupWindow
+        globVisDn := full or showWeak
+        if emitGlobDn and globVisDn and not na(locLblDnBar) and bar_index - locLblDnBar <= dupWindow
             if not na(locLblDn)
                 removeSig(locLblDn)
                 label.delete(locLblDn)
@@ -1462,10 +1523,10 @@ if barstate.isconfirmed
                 removeStopTakeLbl(locTakeLblDn)
                 label.delete(locTakeLblDn)
                 locTakeLblDn := na
-        if showGlob and (full or showWeak)
+        if showGlob and globVisDn
             scoreTxt = full ? "" : " " + str.tostring(passChk) + "/" + str.tostring(totalChk)
             txt = "ГЛОБ↓" + scoreTxt
-            glb = label.new(bar_index, high, txt, style = label.style_label_down, color = color.new(bearCol, full ? 0 : 55), textcolor = color.white, size = size.small, tooltip = "ГЛОБАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + "\nБаров от пробоя до закрепа: " + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
+            glb = label.new(bar_index, high, txt, style = label.style_label_down, color = color.new(bearCol, full ? 0 : 55), textcolor = color.white, size = size.small, tooltip = "ГЛОБАЛЬНЫЙ слом\nУровень: " + str.tostring(lvl, format.mintick) + sigBarsTxt + str.tostring(bar_index - stb) + "\nСкор: " + str.tostring(passChk) + "/" + str.tostring(totalChk))
             pushSig(glb)
             if showBrokenRef
                 pushGlobLine(line.new(stb, lvl, bar_index, lvl, color = color.new(bearCol, 10), style = line.style_dashed, width = 1))
@@ -1473,7 +1534,7 @@ if barstate.isconfirmed
                 pushGlobLine(line.new(bar_index - vpLookback + 1, vpPoc, bar_index, vpPoc, color = color.new(color.yellow, 20), width = 2))
                 pushGlobLine(line.new(bar_index - vpLookback + 1, vpVaHi, bar_index, vpVaHi, color = color.new(color.yellow, 60), style = line.style_dotted, width = 1))
                 pushGlobLine(line.new(bar_index - vpLookback + 1, vpVaLo, bar_index, vpVaLo, color = color.new(color.yellow, 60), style = line.style_dotted, width = 1))
-        if showStopTake and (full or showWeak)
+        if showStopTake and globVisDn
             stopLvl = sFarGlobDn + slBufferViz * atr14
             stopDist = stopLvl - close
             if stopDist > 0
@@ -1515,7 +1576,12 @@ if (showTrend or showFunnel) and barstate.islast
 
     if showFunnel
         conv = nStarted > 0 ? 100.0 * (nLocSlom + nGlobSlom) / nStarted : na
-        lost = math.max(0, nStarted - nFailBack - nFailWindow - nRebind - nLocSlom - nGlobSlom - nRetestFail)
+        // БАГФИКС: невязка показывается СО ЗНАКОМ. Плюс — попытки, ещё не
+        // получившие исхода (в т.ч. живая прямо сейчас); минус — двойной учёт
+        // исходов, то есть баг воронки. Прежний math.max(0, …) глушил ровно
+        // этот случай, и аномалия оставалась невидимой
+        resid    = nStarted - nFailBack - nFailWindow - nRebind - nLocSlom - nGlobSlom - nRetestFail
+        residClr = resid < 0 ? color.red : resid > 0 ? color.orange : txtC
         table.cell(tp, 0, 4, "ВОРОНКА", text_size = size.tiny, text_color = txtC, bgcolor = hdrBg)
         table.cell(tp, 1, 4, str.tostring(bar_index + 1) + " баров", text_size = size.tiny, text_color = txtC, bgcolor = hdrBg)
         table.cell(tp, 0, 5, "Пробоев начато", text_size = size.tiny, text_color = txtC)
@@ -1525,7 +1591,7 @@ if (showTrend or showFunnel) and barstate.islast
         table.cell(tp, 0, 7, "Окно закрепа истекло", text_size = size.tiny, text_color = txtC)
         table.cell(tp, 1, 7, str.tostring(nFailWindow), text_size = size.tiny, text_color = txtC)
         table.cell(tp, 0, 8, "Перепривязка / невязка", text_size = size.tiny, text_color = txtC)
-        table.cell(tp, 1, 8, str.tostring(nRebind) + " / " + str.tostring(lost), text_size = size.tiny, text_color = lost != 0 ? color.orange : txtC)
+        table.cell(tp, 1, 8, str.tostring(nRebind) + " / " + str.tostring(resid), text_size = size.tiny, text_color = residClr)
         table.cell(tp, 0, 9, "Уровней «воскресло»", text_size = size.tiny, text_color = txtC)
         table.cell(tp, 1, 9, str.tostring(nReborn), text_size = size.tiny, text_color = txtC)
         if useRetest
@@ -1536,11 +1602,11 @@ if (showTrend or showFunnel) and barstate.islast
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Локальный гасится глобальным той же стороны ТОЛЬКО если глобальный реально
-// эмитится — тем же условием, что и удаление локальной метки в блоке дедупа
-// выше. Слабый глобальный (не показан, не эмитится) локальный не трогает.
-if emitGlobUp
+// эмитится И виден на графике — ровно тем же условием, что и удаление
+// локальной метки в блоке дедупа выше (иначе алерт уходил бы без метки).
+if emitGlobUp and globVisUp
     emitLocUp := false
-if emitGlobDn
+if emitGlobDn and globVisDn
     emitLocDn := false
 
 alertcondition(emitGlobUp, "Глобальный слом ВВЕРХ", "Слом: глобальный ВВЕРХ")
