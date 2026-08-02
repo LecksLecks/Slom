@@ -1627,18 +1627,35 @@ alertcondition(emitLocDn,  "Локальный слом ВНИЗ",   "Слом: 
 //    Входы — ТОЛЬКО на закрытии подтверждённого бара (process_orders_on_close),
 //    без перерисовки: emit-сигналы финализируются в блоке barstate.isconfirmed,
 //    а HTF-данные берутся с [1] и lookahead_off.
+//
+//    Брекет выставляется в два шага. На баре сигнала — предварительный, от
+//    close, чтобы позиция не оставалась без стопа ни одного бара. На следующем
+//    баре, когда известна фактическая цена исполнения (strategy.position_avg_price),
+//    тот же ордер ОДИН раз переставляется на точные уровни. Дальше уровни за
+//    сделку не пересчитываются: повторный strategy.exit с тем же id модифицирует
+//    висящий ордер, поэтому вызов «по каждому сигналу» уводил бы тейк вслед за
+//    ценой и winner-сделки не доезжали бы до исходной цели.
 // ═════════════════════════════════════════════════════════════════════════════
 gStrat       = "8. Стратегия"
 stratEnabled = input.bool(true,  "Включить исполнение стратегии", group = gStrat)
 stratSide    = input.string("Обе", "Сторона", options = ["Обе", "Только лонг", "Только шорт"], group = gStrat)
 useLocSig    = input.bool(true,  "Входить по локальным сломам", group = gStrat)
 useGlobSig   = input.bool(true,  "Входить по глобальным сломам", group = gStrat)
-allowReverse = input.bool(true,  "Разворот по встречному сигналу", group = gStrat, tooltip = "ВКЛ: встречный сигнал закрывает позицию и открывает противоположную. ВЫКЛ: вход только из флэта.")
+allowReverse = input.bool(true,  "Разворот по встречному сигналу", group = gStrat, tooltip = "ВКЛ: встречный сигнал закрывает позицию и открывает противоположную. ВЫКЛ: вход только из флэта. Повторный сигнал В ТУ ЖЕ сторону не делает ничего в обоих режимах: уровни открытой сделки фиксируются один раз, при входе.")
 
 useDates = input.bool(false, "Ограничить окно бэктеста", group = gStrat)
 fromDate = input.time(timestamp("2023-01-01 00:00"), "С даты", group = gStrat)
 toDate   = input.time(timestamp("2026-01-01 00:00"), "По дату", group = gStrat)
 inWindow = not useDates or (time >= fromDate and time <= toDate)
+
+gExit          = "8.1 Выход: частичный тейк / безубыток / трейл"
+usePartialExit = input.bool(true,  "Частичный выход на первой цели", group = gExit, tooltip = "ВЫКЛ — единый выход: вся позиция закрывается стопом или тейком на R:R из группы «9. Стоп/тейк на сломе». ВКЛ — на первой цели снимается часть позиции, остаток идёт до того же тейка с безубытком и трейлом. Переключатель нужен для сравнения «до/после» в Strategy Tester.")
+partialPct     = input.float(50,  "Доля позиции на первой цели, %", minval = 1, maxval = 99, step = 5, group = gExit)
+partialR       = input.float(1.0, "Первая цель, × R", minval = 0.1, step = 0.1, group = gExit, tooltip = "R = расстояние от ФАКТИЧЕСКОЙ цены входа до структурного стопа. Должна быть меньше R:R из группы «9. Стоп/тейк на сломе»: первая цель не может стоять за финальным тейком, иначе частичный выход для сделки не выставляется вовсе.")
+useBreakeven   = input.bool(true,  "После первой цели — стоп в безубыток", group = gExit)
+beOffsetR      = input.float(0.3, "Безубыток: смещение в прибыль, × R", minval = 0, step = 0.05, group = gExit, tooltip = "Запас на комиссию и проскальзывание, чтобы «безубыток» действительно был безубытком, а не гарантированным мелким лоссом. Круговая комиссия 0.05% × 2 = 0.1% цены; при R ≈ 1% цены дефолт 0.3R даёт ~3-кратный запас сверх комиссии — этого хватает на slippage=2 тика в обе стороны, но НЕ хватит на узких структурных стопах (R существенно меньше 1% цены), где 0.1% издержек может быть сравнимо с самим R. Считайте под свой инструмент: минимум ≈ (комиссия×2 + slippage-в-% ) / R.")
+useTrail       = input.bool(true,  "После первой цели — трейл остатка", group = gExit)
+trailAtrMult   = input.float(2.0, "Трейл: отступ от экстремума сделки, × ATR14", minval = 0.1, step = 0.1, group = gExit, tooltip = "Стоп остатка = экстремум цены с момента входа ∓ множитель × ATR14. Двигается только в сторону прибыли и не ставится «внутрь рынка» (для лонга — не выше close текущего бара).")
 
 // Итоговые сигналы стороны (глобальный уже погасил одноимённый локальный выше).
 longSig  = (useGlobSig and emitGlobUp) or (useLocSig and emitLocUp)
@@ -1651,23 +1668,126 @@ allowShort = stratSide != "Только лонг"
 farUp = emitGlobUp ? sFarGlobUp : sFarLocUp
 farDn = emitGlobDn ? sFarGlobDn : sFarLocDn
 
-if stratEnabled and inWindow and barstate.isconfirmed
-    // Лонг (пропускаем неоднозначный бар, где одновременно есть встречный сигнал).
-    if longSig and not shortSig and allowLong and not na(farUp)
-        stopL = farUp - slBufferViz * atr14
-        distL = close - stopL
-        if distL > 0
-            takeL = close + distL * rrRatioViz
-            if allowReverse or strategy.position_size <= 0
-                strategy.entry("Long", strategy.long)
-                strategy.exit("Long TP/SL", "Long", stop = stopL, limit = takeL)
+// Идентификаторы ордеров. Брекет остатка сохраняет прежние имена, чтобы старые
+// и новые прогоны Strategy Tester читались одинаково.
+idEntryL = "Long"
+idEntryS = "Short"
+idExitL  = "Long TP/SL"   // остаток позиции (или вся позиция, если частичный выход выключен)
+idExitS  = "Short TP/SL"
+idPartL  = "Long TP1"     // первая часть, снимается лимитом на partialR
+idPartS  = "Short TP1"
 
-    // Шорт
-    if shortSig and not longSig and allowShort and not na(farDn)
-        stopS = farDn + slBufferViz * atr14
-        distS = stopS - close
-        if distS > 0
-            takeS = close - distS * rrRatioViz
-            if allowReverse or strategy.position_size >= 0
-                strategy.entry("Short", strategy.short)
-                strategy.exit("Short TP/SL", "Short", stop = stopS, limit = takeS)
+// ─── Состояние исполнения ────────────────────────────────────────────────────
+// Заявка, поданная на баре сигнала: маркет-ордер исполняется на закрытии ЭТОГО
+// бара, но strategy.position_* показывают новую позицию только со следующего.
+var int   pendDir  = 0   //  1 = подан лонг, -1 = подан шорт, 0 = заявки нет
+var float pendStop = na  // структурный стоп, зафиксированный на баре сигнала
+
+// Сопровождение открытой позиции: считается один раз, от фактической цены
+// входа, и живёт до закрытия сделки. Двигается только стоп остатка.
+var int   posDir    = 0      // сторона сопровождаемой позиции (0 = флэт)
+var float posEntry  = na     // фактическая средняя цена входа
+var float posQty    = na     // размер позиции сразу после входа
+var float posRisk   = na     // 1R в цене
+var float posStop   = na     // текущий стоп остатка
+var float posTake   = na     // финальный тейк, за сделку не пересчитывается
+var float posPeak   = na     // экстремум цены с момента входа (база трейла)
+var bool  posScaled = false  // первая часть уже закрыта
+
+// Сопровождение позиции не ограничено окном бэктеста (inWindow): иначе сделка,
+// открытая на последнем баре окна, осталась бы без точного брекета.
+if stratEnabled and barstate.isconfirmed
+    posSize = strategy.position_size
+    curDir  = posSize > 0 ? 1 : posSize < 0 ? -1 : 0
+
+    // Заявка живёт ровно один бар: к этому моменту она либо исполнена, либо
+    // отвергнута брокером, поэтому флаг снимаем безусловно.
+    armDir  = pendDir
+    armStop = pendStop
+    pendDir  := 0
+    pendStop := na
+
+    // ── 1. Позиция закрыта (стоп, тейк, разворот) — сопровождение выключаем.
+    //      Остальные pos*-поля читаются только при posDir != 0 и целиком
+    //      перезаписываются на следующем входе, обнулять их отдельно незачем.
+    if curDir == 0
+        posDir := 0
+
+    // ── 2. Заявка исполнилась: единственная за сделку перестановка брекета —
+    //      с предварительных уровней (от close) на точные, от цены исполнения.
+    if curDir != 0 and curDir == armDir and curDir != posDir
+        entryPx = strategy.position_avg_price
+        riskPx  = curDir * (entryPx - armStop)
+        entryId = curDir > 0 ? idEntryL : idEntryS
+        if riskPx > 0
+            posDir    := curDir
+            posEntry  := entryPx
+            posQty    := math.abs(posSize)
+            posRisk   := riskPx
+            posStop   := armStop
+            posTake   := entryPx + curDir * riskPx * rrRatioViz
+            posPeak   := entryPx
+            posScaled := false
+            // У первой части СВОЕГО стопа нет: стоп всей позиции держит брекет
+            // остатка (qty_percent по умолчанию = 100 % от текущей позиции).
+            // Два стоп-ордера на одном уровне дробили бы стоп-аут на две сделки
+            // и полагались бы на обрезание объёма брокером.
+            if usePartialExit and partialR < rrRatioViz
+                strategy.exit(curDir > 0 ? idPartL : idPartS, entryId, qty_percent = partialPct, limit = entryPx + curDir * riskPx * partialR)
+            strategy.exit(curDir > 0 ? idExitL : idExitS, entryId, stop = posStop, limit = posTake)
+        else
+            // Исполнение хуже структурного стопа: 1R не определён, риск-модель
+            // сделки нарушена — выходим сразу, а не ведём позицию вслепую.
+            posDir := 0
+            strategy.close(entryId, comment = "invalid risk")
+
+    // ── 3. Сопровождение остатка: первая часть → безубыток → трейл.
+    if posDir != 0 and curDir == posDir
+        posPeak := posDir > 0 ? math.max(posPeak, high) : math.min(posPeak, low)
+        // Факт срабатывания первой цели виден только по уменьшению позиции:
+        // опросить состояние висящего ордера в Pine нельзя.
+        if not posScaled and math.abs(posSize) < posQty * 0.999
+            posScaled := true
+        if posScaled and (useBreakeven or useTrail)
+            rawStop = posStop
+            if useBreakeven
+                beLvl = posEntry + posDir * posRisk * beOffsetR
+                rawStop := posDir > 0 ? math.max(rawStop, beLvl) : math.min(rawStop, beLvl)
+            if useTrail
+                trailLvl = posPeak - posDir * trailAtrMult * atr14
+                rawStop := posDir > 0 ? math.max(rawStop, trailLvl) : math.min(rawStop, trailLvl)
+            // Стоп не ослабляем и не заводим «внутрь рынка»: стоп по ту сторону
+            // close брокер исполнил бы маркетом по открытию следующего бара.
+            newStop = posDir > 0 ? math.max(posStop, math.min(rawStop, close)) : math.min(posStop, math.max(rawStop, close))
+            if newStop != posStop
+                posStop := newStop
+                strategy.exit(posDir > 0 ? idExitL : idExitS, posDir > 0 ? idEntryL : idEntryS, stop = posStop, limit = posTake)
+
+    // ── 4. Входы: только из флэта или разворотом из встречной позиции.
+    //      Повторный сигнал в ту же сторону игнорируется — иначе strategy.exit
+    //      с тем же id переставил бы уже висящий брекет.
+    if inWindow
+        canLong  = posSize == 0 or (allowReverse and posSize < 0)
+        canShort = posSize == 0 or (allowReverse and posSize > 0)
+
+        // Лонг (пропускаем неоднозначный бар, где одновременно есть встречный сигнал).
+        if longSig and not shortSig and allowLong and canLong and not na(farUp)
+            stopL = farUp - slBufferViz * atr14
+            distL = close - stopL
+            if distL > 0
+                // Предварительный брекет от close: страхует позицию на баре
+                // между исполнением входа и точным пересчётом (шаг 2).
+                strategy.entry(idEntryL, strategy.long)
+                strategy.exit(idExitL, idEntryL, stop = stopL, limit = close + distL * rrRatioViz)
+                pendDir  := 1
+                pendStop := stopL
+
+        // Шорт
+        if shortSig and not longSig and allowShort and canShort and not na(farDn)
+            stopS = farDn + slBufferViz * atr14
+            distS = stopS - close
+            if distS > 0
+                strategy.entry(idEntryS, strategy.short)
+                strategy.exit(idExitS, idEntryS, stop = stopS, limit = close - distS * rrRatioViz)
+                pendDir  := -1
+                pendStop := stopS
